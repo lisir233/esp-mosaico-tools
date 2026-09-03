@@ -12,7 +12,12 @@ tool resources are resolved from this checkout.
 ```sh
 python3 submodule/esp-mosaico-tools/mosaico.py doctor
 python3 submodule/esp-mosaico-tools/mosaico.py install --project projects/app
+python3 submodule/esp-mosaico-tools/mosaico.py system-update --project projects/app
 ```
+
+`install` updates only the application OTA partition. `system-update` builds
+and submits the workspace's atomic application, UI assets, and system-data
+bundle by default; use `--skip-build` or `--bundle PATH` to reuse artifacts.
 
 The CLI searches the current directory and its parents for `.mosaico.json`.
 Use `--workspace PATH` to select another workspace explicitly.

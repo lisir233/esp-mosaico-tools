@@ -138,11 +138,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     system_update_parser = commands.add_parser(
         "system-update",
-        help="Start a Recovery full-system update from HTTP(S) or NAND",
+        help="Build and install ota_0, ui_apps, and system as one transaction",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    system_update_source = system_update_parser.add_mutually_exclusive_group(
-        required=True
+    system_update_source = system_update_parser.add_mutually_exclusive_group()
+    system_update_source.add_argument(
+        "--bundle",
+        type=Path,
+        help="Reuse an existing local .irisfw bundle instead of building one",
     )
     system_update_source.add_argument(
         "--manifest-url",
@@ -160,6 +163,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     system_update_parser.add_argument(
         "--gateway-profile", help="ESP-Iris profile; use the current profile by default"
+    )
+    system_update_parser.add_argument(
+        "--project", help="ESP-IDF application path; selected automatically by default"
+    )
+    system_update_parser.add_argument(
+        "--skip-build",
+        action="store_true",
+        help="Reuse the default bundle from a complete existing build",
+    )
+    system_update_parser.add_argument(
+        "--timeout",
+        type=positive_timeout,
+        default=900.0,
+        help="System Update timeout in seconds",
     )
 
     recover_parser = commands.add_parser(

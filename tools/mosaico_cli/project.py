@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 from pathlib import Path
 
 from .errors import BuildError, SelectionError
 from .workspace import WorkspaceConfig
+
+
+PARTITION_TABLE_FLASH_BYTES = 0x1000
 
 
 @dataclass(frozen=True)
@@ -18,6 +22,7 @@ class BuildArtifacts:
     image: Path
     elf: Path
     map_file: Path
+    partition_table: Path
     project_name: str
     project_version: str
     target: str
@@ -116,7 +121,12 @@ def discover_artifacts(project: Path) -> BuildArtifacts:
     image = build_dir / str(description.get("app_bin") or f"{name}.bin")
     elf = build_dir / str(description.get("app_elf") or f"{name}.elf")
     map_file = build_dir / f"{name}.map"
-    missing = [str(path) for path in (image, elf, map_file) if not path.is_file()]
+    partition_table = build_dir / "partition_table" / "partition-table.bin"
+    missing = [
+        str(path)
+        for path in (image, elf, map_file, partition_table)
+        if not path.is_file()
+    ]
     if missing:
         raise BuildError(
             "Build artifacts are incomplete.",
@@ -129,7 +139,28 @@ def discover_artifacts(project: Path) -> BuildArtifacts:
         image=image,
         elf=elf,
         map_file=map_file,
+        partition_table=partition_table,
         project_name=name,
         project_version=str(description.get("project_version") or ""),
         target=str(description.get("target") or ""),
     )
+
+
+def partition_table_flash_sha256(path: Path) -> str:
+    """Hash the complete 4 KiB partition-table Flash sector."""
+
+    try:
+        data = path.read_bytes()
+    except OSError as error:
+        raise BuildError(f"Could not read the built partition table: {path}") from error
+    if not data or len(data) > PARTITION_TABLE_FLASH_BYTES:
+        raise BuildError(
+            "The built partition table has an invalid size.",
+            details={
+                "path": str(path),
+                "size": len(data),
+                "maximum": PARTITION_TABLE_FLASH_BYTES,
+            },
+        )
+    flash_sector = data.ljust(PARTITION_TABLE_FLASH_BYTES, b"\xff")
+    return hashlib.sha256(flash_sector).hexdigest()

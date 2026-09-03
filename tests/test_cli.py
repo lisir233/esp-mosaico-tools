@@ -53,6 +53,7 @@ from mosaico_cli.errors import (
 )
 from mosaico_cli.gateway import (
     GatewaySession,
+    _require_compatible_gateway,
     acquire_endpoint_maintenance_lease,
     acquire_maintenance_lease,
     ensure_gateway,
@@ -60,7 +61,9 @@ from mosaico_cli.gateway import (
     iris_environment_root,
     locate_iris_tools,
     run_ota,
+    run_system_update_bundle,
     select_device,
+    system_inventory,
 )
 from mosaico_cli.host import (
     HostEnvironmentError,
@@ -71,7 +74,7 @@ from mosaico_cli.host import (
     state_root,
     virtual_environment_python,
 )
-from mosaico_cli.project import resolve_project
+from mosaico_cli.project import partition_table_flash_sha256, resolve_project
 from mosaico_cli.recovery import (
     _host_verification_path,
     _read_verification_record,
@@ -153,6 +156,18 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(value.validation, "elf-sha256")
         self.assertEqual(value.timeout, 600)
         self.assertFalse(value.skip_build)
+
+    def test_system_update_defaults_to_local_build(self) -> None:
+        value = self.parse("system-update")
+        self.assertIsNone(value.bundle)
+        self.assertIsNone(value.manifest_url)
+        self.assertIsNone(value.manifest_path)
+        self.assertFalse(value.skip_build)
+        self.assertEqual(value.timeout, 900)
+
+    def test_system_update_accepts_local_bundle(self) -> None:
+        value = self.parse("system-update", "--bundle", "release.irisfw")
+        self.assertEqual(value.bundle, Path("release.irisfw"))
 
     def test_recover_defaults(self) -> None:
         value = self.parse("recover")
@@ -444,6 +459,127 @@ class RegistryAndSelectionTests(unittest.TestCase):
 
 
 class GatewayTests(unittest.TestCase):
+    def test_general_gateway_compatibility_does_not_require_inventory(self) -> None:
+        health = {
+            "gateway_api": {"major": 1, "minor": 1},
+            "capabilities": ["device-maintenance-lease/v1"],
+        }
+        self.assertIs(_require_compatible_gateway(health), health)
+
+    def test_system_inventory_requires_partition_preflight_capability(self) -> None:
+        with mock.patch(
+            "mosaico_cli.gateway.gateway_json",
+            return_value={"capabilities": ["device-maintenance-lease/v1"]},
+        ), self.assertRaises(EnvironmentError) as caught:
+            system_inventory(mock.Mock(), mock.Mock(), "device-a")
+        self.assertIn("partition-table preflight", str(caught.exception))
+
+    def test_system_inventory_validates_and_normalizes_partition_hash(self) -> None:
+        context = mock.Mock()
+        session = mock.Mock()
+        with mock.patch(
+            "mosaico_cli.gateway.gateway_json",
+            side_effect=[
+                {"capabilities": ["system-inventory/v1"]},
+                {"inventory": {"partition_table_sha256": "AB" * 32}},
+            ],
+        ) as request:
+            inventory = system_inventory(context, session, "device-a")
+
+        self.assertEqual(inventory["partition_table_sha256"], "ab" * 32)
+        self.assertEqual(
+            [call.args[2:] for call in request.call_args_list],
+            [("health",), ("system-inventory", "device-a")],
+        )
+
+    def test_system_inventory_rejects_missing_partition_hash(self) -> None:
+        with mock.patch(
+            "mosaico_cli.gateway.gateway_json",
+            side_effect=[
+                {"capabilities": ["system-inventory/v1"]},
+                {"inventory": {"layout_version": 4}},
+            ],
+        ), self.assertRaises(DeviceError):
+            system_inventory(mock.Mock(), mock.Mock(), "device-a")
+
+    def test_local_system_update_builds_and_submits_atomic_bundle(self) -> None:
+        with ExitStack() as _contexts:
+            temporary = _contexts.enter_context(tempfile.TemporaryDirectory())
+            root = Path(temporary)
+            project = root / "project"
+            build_dir = project / "build"
+            build_dir.mkdir(parents=True)
+            bundle = build_dir / "edge_agent-system-update.irisfw"
+            bundle.write_bytes(b"bundle")
+            artifacts = SimpleNamespace(
+                build_dir=build_dir,
+                project_name="edge_agent",
+            )
+            arguments = argparse.Namespace(
+                gateway_profile=None,
+                device_id=None,
+                manifest_url=None,
+                manifest_path=None,
+                bundle=None,
+                project=str(project),
+                skip_build=False,
+                timeout=900,
+            )
+            context = mock.Mock(
+                workspace=workspace_for(root, default_project=project),
+                log_path=Path("run.log"),
+            )
+            session = GatewaySession(Path("python"), Path("iris"), (), None, False)
+            _contexts.enter_context(
+                mock.patch("mosaico_cli.commands.resolve_project", return_value=project)
+            )
+            _contexts.enter_context(
+                mock.patch("mosaico_cli.commands.resolve_idf_path", return_value=Path("/idf"))
+            )
+            build = _contexts.enter_context(
+                mock.patch("mosaico_cli.commands.run_idf_target")
+            )
+            _contexts.enter_context(
+                mock.patch(
+                    "mosaico_cli.commands.discover_artifacts",
+                    return_value=artifacts,
+                )
+            )
+            _contexts.enter_context(
+                mock.patch("mosaico_cli.commands.ensure_gateway", return_value=session)
+            )
+            _contexts.enter_context(
+                mock.patch(
+                    "mosaico_cli.commands.connected_devices",
+                    return_value=[{"device_id": "device-a", "firmware_mode": "normal"}],
+                )
+            )
+            _contexts.enter_context(
+                mock.patch(
+                    "mosaico_cli.commands.gateway_json",
+                    return_value={"device": {"firmware_mode": "normal"}},
+                )
+            )
+            submit = _contexts.enter_context(
+                mock.patch(
+                    "mosaico_cli.commands.run_system_update_bundle",
+                    return_value={"operation": {"status": "succeeded"}},
+                )
+            )
+            result = start_system_update(arguments, context)
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["source"], "local_build")
+        self.assertEqual(result["bundle"], str(bundle))
+        self.assertEqual(build.call_args.kwargs["target"], "system-update-bundle")
+        submit.assert_called_once_with(
+            context,
+            session,
+            device_id="device-a",
+            bundle=bundle,
+            timeout=900,
+        )
+
     def test_list_devices_reads_the_selected_gateway(self) -> None:
         context = mock.Mock()
         session = GatewaySession(
@@ -962,6 +1098,59 @@ class GatewayTests(unittest.TestCase):
         self.assertTrue(any("waiting_recovery" in message for message in messages))
         self.assertTrue(any("succeeded" in message for message in messages))
 
+    def test_system_update_bundle_is_submitted_and_polled(self) -> None:
+        context = mock.Mock(log_path=Path("run.log"))
+        context.run.return_value = subprocess.CompletedProcess(
+            [],
+            0,
+            json.dumps(
+                {
+                    "operation": {
+                        "operation_id": "system-operation-1",
+                        "status": "running",
+                        "progress": {
+                            "stage": "validating_plan",
+                            "progress_permille": 50,
+                        },
+                    }
+                }
+            ),
+            "",
+        )
+        completed = {
+            "operation": {
+                "operation_id": "system-operation-1",
+                "status": "succeeded",
+                "progress": {
+                    "stage": "succeeded",
+                    "progress_permille": 1000,
+                },
+            }
+        }
+        session = GatewaySession(Path("python"), Path("iris"), (), None, False)
+        with ExitStack() as _contexts:
+            poll = _contexts.enter_context(
+                mock.patch("mosaico_cli.gateway.gateway_json", return_value=completed)
+            )
+            _contexts.enter_context(mock.patch("mosaico_cli.gateway.time.sleep"))
+            result = run_system_update_bundle(
+                context,
+                session,
+                device_id="device",
+                bundle=Path("release.irisfw"),
+                timeout=900,
+            )
+
+        self.assertEqual(result["operation"]["status"], "succeeded")
+        argv = context.run.call_args.args[0]
+        self.assertIn("system-update", argv)
+        self.assertIn("release.irisfw", argv)
+        poll.assert_called_once_with(
+            context, session, "ota-status", "system-operation-1"
+        )
+        messages = [call.args[0] for call in context.status.call_args_list]
+        self.assertTrue(any("validating_plan" in message for message in messages))
+
     def test_monitor_forces_unbuffered_child_output(self) -> None:
         arguments = argparse.Namespace(
             gateway_profile=None,
@@ -1312,6 +1501,22 @@ class ProjectTests(unittest.TestCase):
                 resolve_project(workspace_for(root), None, root)
             self.assertEqual(len(caught.exception.details["candidates"]), 2)
 
+    def test_partition_table_hash_covers_erased_flash_sector(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "partition-table.bin"
+            path.write_bytes(b"partition-table")
+            expected = hashlib.sha256(
+                b"partition-table" + b"\xff" * (0x1000 - len(b"partition-table"))
+            ).hexdigest()
+            self.assertEqual(partition_table_flash_sha256(path), expected)
+
+    def test_partition_table_larger_than_flash_sector_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "partition-table.bin"
+            path.write_bytes(b"x" * (0x1000 + 1))
+            with self.assertRaises(BuildError):
+                partition_table_flash_sha256(path)
+
 
 class RecoveryBundleTests(unittest.TestCase):
     def test_primary_verification_record_is_host_global(self) -> None:
@@ -1458,10 +1663,14 @@ class RecoveryCommandTests(unittest.TestCase):
             project.mkdir()
             image = project / "app.bin"
             image.write_bytes(b"firmware")
+            partition_table = project / "partition-table.bin"
+            partition_table.write_bytes(b"partition-table")
+            layout_sha256 = partition_table_flash_sha256(partition_table)
             artifacts = SimpleNamespace(
                 image=image,
                 elf=project / "app.elf",
                 map_file=project / "app.map",
+                partition_table=partition_table,
                 project_name="app",
                 project_version="1.0.0",
                 target="esp32s31",
@@ -1514,7 +1723,13 @@ class RecoveryCommandTests(unittest.TestCase):
                 _contexts.enter_context(
                     mock.patch("mosaico_cli.commands.gateway_json", return_value=status)
                 )
-                _contexts.enter_context(
+                inventory = _contexts.enter_context(
+                    mock.patch(
+                        "mosaico_cli.commands.system_inventory",
+                        return_value={"partition_table_sha256": layout_sha256},
+                    )
+                )
+                ota = _contexts.enter_context(
                     mock.patch("mosaico_cli.commands.run_ota", return_value={})
                 )
                 record = _contexts.enter_context(
@@ -1523,6 +1738,102 @@ class RecoveryCommandTests(unittest.TestCase):
                 result = install(arguments, context)
             self.assertEqual(result["status"], "succeeded")
             record.assert_called_once_with("device", "2.1.1-recovery", 123)
+            inventory.assert_called_once_with(context, session, "device")
+            ota.assert_called_once()
+
+    def test_install_rejects_mismatched_partition_table_before_ota(self) -> None:
+        with ExitStack() as _contexts:
+            temporary = _contexts.enter_context(tempfile.TemporaryDirectory())
+            root = Path(temporary)
+            project = root / "project"
+            project.mkdir()
+            image = project / "app.bin"
+            image.write_bytes(b"firmware")
+            partition_table = project / "partition-table.bin"
+            partition_table.write_bytes(b"target-layout")
+            artifacts = SimpleNamespace(
+                image=image,
+                elf=project / "app.elf",
+                map_file=project / "app.map",
+                partition_table=partition_table,
+                project_name="app",
+                project_version="1.0.0",
+                target="esp32s31",
+            )
+            arguments = SimpleNamespace(
+                project=str(project),
+                skip_build=True,
+                gateway_profile=None,
+                device_id=None,
+                validation="elf-sha256",
+                timeout=30,
+            )
+            context = RunContext(
+                workspace_for(root), "install-layout-test", json_output=True
+            )
+            session = SimpleNamespace(started_local=False)
+            status = {
+                "device_id": "device",
+                "firmware_mode": "recovery",
+                "app_version": "2.1.1-recovery",
+                "capability_names": ["ota"],
+                "boot_id": 123,
+            }
+            with ExitStack() as patches:
+                patches.enter_context(
+                    mock.patch(
+                        "mosaico_cli.commands.resolve_project", return_value=project
+                    )
+                )
+                patches.enter_context(
+                    mock.patch(
+                        "mosaico_cli.commands.discover_artifacts",
+                        return_value=artifacts,
+                    )
+                )
+                patches.enter_context(
+                    mock.patch(
+                        "mosaico_cli.commands.load_bundle",
+                        return_value={"version": "2.1.1-recovery"},
+                    )
+                )
+                patches.enter_context(
+                    mock.patch(
+                        "mosaico_cli.commands.ensure_gateway", return_value=session
+                    )
+                )
+                patches.enter_context(
+                    mock.patch(
+                        "mosaico_cli.commands.connected_devices",
+                        return_value=[status],
+                    )
+                )
+                patches.enter_context(
+                    mock.patch(
+                        "mosaico_cli.commands.gateway_json", return_value=status
+                    )
+                )
+                patches.enter_context(
+                    mock.patch(
+                        "mosaico_cli.commands.system_inventory",
+                        return_value={"partition_table_sha256": "00" * 32},
+                    )
+                )
+                ota = patches.enter_context(
+                    mock.patch("mosaico_cli.commands.run_ota")
+                )
+                patches.enter_context(
+                    mock.patch("mosaico_cli.commands.record_recovery_verification")
+                )
+                caught = patches.enter_context(self.assertRaises(DeviceError))
+                install(arguments, context)
+
+            self.assertIn("does not match", str(caught.exception))
+            self.assertEqual(
+                caught.exception.details["actual_partition_table_sha256"],
+                "00" * 32,
+            )
+            ota.assert_not_called()
 
     def test_registered_esp32s31_recovery_device_is_detected(self) -> None:
         port = SimpleNamespace(

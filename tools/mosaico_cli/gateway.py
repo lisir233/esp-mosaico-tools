@@ -32,6 +32,7 @@ LOCAL_URL = "http://127.0.0.1:8443"
 REQUIRED_GATEWAY_API_MAJOR = 1
 MAINTENANCE_CAPABILITY = "device-maintenance-lease/v1"
 ENDPOINT_MAINTENANCE_CAPABILITY = "physical-endpoint-maintenance-lease/v1"
+SYSTEM_INVENTORY_CAPABILITY = "system-inventory/v1"
 
 
 def _state_home() -> Path:
@@ -390,6 +391,39 @@ def gateway_json(
     return _decode_json(result.stdout)
 
 
+def system_inventory(
+    context: RunContext,
+    session: GatewaySession,
+    device_id: str,
+) -> dict[str, Any]:
+    """Read and validate the device's live system inventory."""
+
+    health = gateway_json(context, session, "health")
+    capabilities = health.get("capabilities", []) if isinstance(health, dict) else []
+    if SYSTEM_INVENTORY_CAPABILITY not in capabilities:
+        raise EnvironmentError(
+            "The reachable ESP-Iris Gateway does not support partition-table "
+            "preflight checks. Update or restart it from the pinned ESP-Iris submodule."
+        )
+    value = gateway_json(
+        context,
+        session,
+        "system-inventory",
+        device_id,
+    )
+    inventory = value.get("inventory") if isinstance(value, dict) else None
+    if not isinstance(inventory, dict):
+        raise DeviceError("ESP-Iris returned an invalid system inventory.")
+    partition_hash = inventory.get("partition_table_sha256")
+    if not isinstance(partition_hash, str) or re.fullmatch(
+        r"[0-9a-fA-F]{64}", partition_hash
+    ) is None:
+        raise DeviceError(
+            "The device did not report a valid partition-table SHA-256."
+        )
+    return {**inventory, "partition_table_sha256": partition_hash.lower()}
+
+
 def acquire_maintenance_lease(
     context: RunContext,
     session: GatewaySession,
@@ -599,6 +633,107 @@ def select_device(devices: list[dict[str, Any]], requested: str | None) -> dict[
     )
 
 
+def _wait_gateway_operation(
+    context: RunContext,
+    session: GatewaySession,
+    *,
+    result: subprocess.CompletedProcess[str],
+    started: float,
+    timeout: float,
+    action: str,
+    progress_prefix: str,
+) -> dict[str, Any]:
+    try:
+        value = _decode_json(result.stdout)
+    except OperationError:
+        value = {}
+    operation = value.get("operation", value) if isinstance(value, dict) else {}
+    if not isinstance(operation, dict):
+        operation = {}
+    operation_id = str(operation.get("operation_id") or "")
+    status = operation.get("status")
+    if result.returncode:
+        if status in {"outcome_unknown", "unknown"} or status is None:
+            raise OutcomeUnknownError(
+                f"The {action.lower()} submission outcome is unknown; the write "
+                "operation will not be replayed automatically.",
+                details={"result": value, "log": str(context.log_path)},
+            )
+        raise OperationError(
+            f"{action} submission failed.",
+            details={"result": value, "log": str(context.log_path)},
+        )
+    if not operation_id or status in {"outcome_unknown", "unknown"} or status is None:
+        raise OutcomeUnknownError(
+            f"The {action.lower()} outcome is unknown; the write operation will not be "
+            "replayed automatically.",
+            details={"result": value, "log": str(context.log_path)},
+        )
+
+    terminal = {
+        "succeeded",
+        "success",
+        "completed",
+        "failed",
+        "cancelled",
+        "interrupted",
+        "outcome_unknown",
+        "unknown",
+    }
+    last_stage = ""
+    last_bucket = -1
+    while status not in terminal:
+        if time.monotonic() - started >= timeout:
+            raise OutcomeUnknownError(
+                f"{action} timed out and the device outcome is unknown; the write "
+                "operation will not be replayed automatically.",
+                details={"operation_id": operation_id, "log": str(context.log_path)},
+            )
+        progress = operation.get("progress")
+        progress = progress if isinstance(progress, dict) else {}
+        stage = str(progress.get("stage") or status)
+        permille = max(0, min(int(progress.get("progress_permille") or 0), 1000))
+        bucket = permille // 50
+        if stage != last_stage or bucket != last_bucket:
+            detail = f"{progress_prefix}: {stage} {permille / 10:.1f}%"
+            received = int(progress.get("bytes_received") or 0)
+            total = int(progress.get("bytes_total") or 0)
+            if total > 0:
+                detail += f" ({received}/{total} bytes)"
+            context.status(detail)
+            last_stage = stage
+            last_bucket = bucket
+        time.sleep(0.25)
+        current = gateway_json(context, session, "ota-status", operation_id)
+        operation = current.get("operation", current) if isinstance(current, dict) else {}
+        if not isinstance(operation, dict):
+            operation = {}
+        status = operation.get("status")
+        if status is None:
+            raise OutcomeUnknownError(
+                f"The {action.lower()} status response is invalid; the write operation will "
+                "not be replayed automatically.",
+                details={"operation_id": operation_id, "result": current,
+                         "log": str(context.log_path)},
+            )
+
+    progress = operation.get("progress")
+    progress = progress if isinstance(progress, dict) else {}
+    context.status(
+        f"{progress_prefix}: {progress.get('stage', status)} "
+        f"{int(progress.get('progress_permille') or 0) / 10:.1f}%"
+    )
+    if status not in {"succeeded", "success", "completed"}:
+        raise OperationError(
+            f"{action} failed: {status}",
+            details={"result": operation, "log": str(context.log_path)},
+        )
+    if isinstance(value, dict):
+        value["operation"] = operation
+        return value
+    return {"operation": operation}
+
+
 def run_ota(
     context: RunContext,
     session: GatewaySession,
@@ -610,6 +745,7 @@ def run_ota(
     validation: str,
     timeout: float,
 ) -> dict[str, Any]:
+    del validation
     started = time.monotonic()
     try:
         result = context.run(
@@ -632,92 +768,45 @@ def run_ota(
             "operation will not be replayed automatically.",
             details={"log": str(context.log_path)},
         ) from error
-    try:
-        value = _decode_json(result.stdout)
-    except OperationError:
-        value = {}
-    operation = value.get("operation", value) if isinstance(value, dict) else {}
-    if not isinstance(operation, dict):
-        operation = {}
-    operation_id = str(operation.get("operation_id") or "")
-    status = operation.get("status")
-    if result.returncode:
-        if status in {"outcome_unknown", "unknown"} or status is None:
-            raise OutcomeUnknownError(
-                "The installation submission outcome is unknown; the write operation "
-                "will not be replayed automatically.",
-                details={"result": value, "log": str(context.log_path)},
-            )
-        raise OperationError(
-            "Installation submission failed.",
-            details={"result": value, "log": str(context.log_path)},
-        )
-    if not operation_id or status in {"outcome_unknown", "unknown"} or status is None:
-        raise OutcomeUnknownError(
-            "The installation outcome is unknown; the write operation will not be "
-            "replayed automatically.",
-            details={"result": value, "log": str(context.log_path)},
-        )
-
-    terminal = {
-        "succeeded",
-        "success",
-        "completed",
-        "failed",
-        "cancelled",
-        "interrupted",
-        "outcome_unknown",
-        "unknown",
-    }
-    last_stage = ""
-    last_bucket = -1
-    while status not in terminal:
-        if time.monotonic() - started >= timeout:
-            raise OutcomeUnknownError(
-                "Installation timed out and the device outcome is unknown; the write "
-                "operation will not be replayed automatically.",
-                details={"operation_id": operation_id, "log": str(context.log_path)},
-            )
-        progress = operation.get("progress")
-        progress = progress if isinstance(progress, dict) else {}
-        stage = str(progress.get("stage") or status)
-        permille = max(0, min(int(progress.get("progress_permille") or 0), 1000))
-        bucket = permille // 50
-        if stage != last_stage or bucket != last_bucket:
-            detail = f"ota: {stage} {permille / 10:.1f}%"
-            received = int(progress.get("bytes_received") or 0)
-            total = int(progress.get("bytes_total") or 0)
-            if total > 0:
-                detail += f" ({received}/{total} bytes)"
-            context.status(detail)
-            last_stage = stage
-            last_bucket = bucket
-        time.sleep(0.25)
-        current = gateway_json(context, session, "ota-status", operation_id)
-        operation = current.get("operation", current) if isinstance(current, dict) else {}
-        if not isinstance(operation, dict):
-            operation = {}
-        status = operation.get("status")
-        if status is None:
-            raise OutcomeUnknownError(
-                "The installation status response is invalid; the write operation will "
-                "not be replayed automatically.",
-                details={"operation_id": operation_id, "result": current,
-                         "log": str(context.log_path)},
-            )
-
-    progress = operation.get("progress")
-    progress = progress if isinstance(progress, dict) else {}
-    context.status(
-        f"ota: {progress.get('stage', status)} "
-        f"{int(progress.get('progress_permille') or 0) / 10:.1f}%"
+    return _wait_gateway_operation(
+        context,
+        session,
+        result=result,
+        started=started,
+        timeout=timeout,
+        action="Installation",
+        progress_prefix="ota",
     )
-    if status not in {"succeeded", "success", "completed"}:
-        raise OperationError(
-            f"Installation failed: {status}",
-            details={"result": operation, "log": str(context.log_path)},
+
+
+def run_system_update_bundle(
+    context: RunContext,
+    session: GatewaySession,
+    *,
+    device_id: str,
+    bundle: Path,
+    timeout: float,
+) -> dict[str, Any]:
+    """Submit one reviewed local System Update bundle and wait for validation."""
+
+    started = time.monotonic()
+    try:
+        result = context.run(
+            session.ctl_argv("system-update", device_id, str(bundle)),
+            timeout=timeout,
         )
-    if isinstance(value, dict):
-        value["operation"] = operation
-        return value
-    return {"operation": operation}
+    except subprocess.TimeoutExpired as error:
+        raise OutcomeUnknownError(
+            "System update submission timed out and the device outcome is unknown; "
+            "the write operation will not be replayed automatically.",
+            details={"log": str(context.log_path)},
+        ) from error
+    return _wait_gateway_operation(
+        context,
+        session,
+        result=result,
+        started=started,
+        timeout=timeout,
+        action="System update",
+        progress_prefix="system update",
+    )

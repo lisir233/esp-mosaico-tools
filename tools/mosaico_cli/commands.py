@@ -24,9 +24,11 @@ from .gateway import (
     gateway_json,
     renew_maintenance_lease,
     run_ota,
+    run_system_update_bundle,
     select_device,
+    system_inventory,
 )
-from .project import discover_artifacts, resolve_project
+from .project import discover_artifacts, partition_table_flash_sha256, resolve_project
 from .recovery import (
     load_bundle,
     provisioning_candidate,
@@ -164,7 +166,66 @@ def list_devices(context: RunContext, gateway_profile: str | None) -> dict[str, 
 
 
 def start_system_update(arguments: Any, context: RunContext) -> dict[str, Any]:
-    """Ask a live Recovery instance to apply an external system bundle."""
+    """Build or select a full-system bundle and apply it through Recovery."""
+
+    manifest_url = getattr(arguments, "manifest_url", None)
+    manifest_path = getattr(arguments, "manifest_path", None)
+    bundle_argument = getattr(arguments, "bundle", None)
+    project_argument = getattr(arguments, "project", None)
+    skip_build = bool(getattr(arguments, "skip_build", False))
+    timeout = float(getattr(arguments, "timeout", 900.0))
+    external_source = manifest_url is not None or manifest_path is not None
+
+    project: Path | None = None
+    bundle: Path | None = None
+    reused_build = False
+    if external_source:
+        if project_argument or skip_build:
+            raise SelectionError(
+                "--project and --skip-build apply only to local System Update bundles."
+            )
+    elif bundle_argument is not None:
+        if project_argument or skip_build:
+            raise SelectionError(
+                "--bundle cannot be combined with --project or --skip-build."
+            )
+        bundle = Path(bundle_argument).expanduser()
+        bundle = (
+            (Path.cwd() / bundle).resolve()
+            if not bundle.is_absolute()
+            else bundle.resolve()
+        )
+        reused_build = True
+    else:
+        project = resolve_project(context.workspace, project_argument, Path.cwd())
+        context.status(f"project: {project}")
+        if not skip_build:
+            context.status("system update: building ota_0 + ui_apps + system bundle")
+            run_idf_target(
+                context,
+                idf_path=resolve_idf_path(context.workspace, project),
+                project=project,
+                build_dir=project / "build",
+                target="system-update-bundle",
+                timeout=3600,
+            )
+        else:
+            context.status("build: reusing existing System Update bundle (--skip-build)")
+        artifacts = discover_artifacts(project)
+        bundle = (
+            artifacts.build_dir
+            / f"{artifacts.project_name}-system-update.irisfw"
+        )
+        reused_build = skip_build
+
+    if bundle is not None:
+        if bundle.suffix != ".irisfw" or not bundle.is_file() or bundle.stat().st_size == 0:
+            raise BuildError(
+                f"A complete local System Update bundle was not found: {bundle}"
+            )
+        context.status(
+            f"bundle: {bundle} ({bundle.stat().st_size} bytes)"
+        )
 
     context.status("gateway: connecting")
     session = ensure_gateway(context, arguments.gateway_profile)
@@ -178,13 +239,36 @@ def start_system_update(arguments: Any, context: RunContext) -> dict[str, Any]:
         f"device: {device_id} mode={firmware_mode or 'unknown'} "
         f"boot_id={status.get('boot_id') or device.get('boot_id') or 'unknown'}"
     )
-    if firmware_mode != "recovery":
+    if external_source and firmware_mode != "recovery":
         raise RecoveryRequiredError(
-            "System update requires a live Recovery service. "
+            "External System Update requires a live Recovery service. "
             "Run 'python mosaico.py recover' first."
         )
 
-    manifest_url = getattr(arguments, "manifest_url", None)
+    if bundle is not None:
+        context.status("system update: submitting local atomic bundle")
+        operation = run_system_update_bundle(
+            context,
+            session,
+            device_id=device_id,
+            bundle=bundle,
+            timeout=timeout,
+        )
+        context.status("validation: application and system partitions are healthy")
+        return {
+            "command": "system-update",
+            "status": "succeeded",
+            "device_id": device_id,
+            "firmware_mode": firmware_mode,
+            "source": "bundle" if bundle_argument is not None else "local_build",
+            "project": str(project) if project is not None else None,
+            "bundle": str(bundle),
+            "reused_build": reused_build,
+            "gateway_started": session.started_local,
+            "operation": operation,
+            "log": str(context.log_path),
+        }
+
     if manifest_url:
         method_id = "1"
         payload = manifest_url
@@ -244,6 +328,9 @@ def install(arguments: Any, context: RunContext) -> dict[str, Any]:
             f"The project target is {artifacts.target!r}, but the device requires "
             f"{model.target!r}."
         )
+    expected_layout_sha256 = partition_table_flash_sha256(
+        artifacts.partition_table
+    )
 
     context.status("gateway: connecting")
     session = ensure_gateway(context, arguments.gateway_profile)
@@ -280,6 +367,42 @@ def install(arguments: Any, context: RunContext) -> dict[str, Any]:
             # that proof merely because Windows briefly blocks the state file.
             context.note(f"warning: could not refresh Recovery verification: {error}")
     context.status("recovery: verified retained Recovery service")
+
+    context.status("partition table: verifying device layout")
+    try:
+        inventory = system_inventory(context, session, device_id)
+    except DeviceError as error:
+        raise DeviceError(
+            "Could not verify the device partition table; refusing to start OTA. "
+            "Run 'python mosaico.py recover' on the Gateway host, or apply an "
+            "authorized system update."
+        ) from error
+    actual_layout_sha256 = inventory["partition_table_sha256"]
+    context.note(
+        "partition table verification: "
+        + json.dumps(
+            {
+                "actual_sha256": actual_layout_sha256,
+                "expected_sha256": expected_layout_sha256,
+                "partition_table": str(artifacts.partition_table),
+            },
+            sort_keys=True,
+        )
+    )
+    if actual_layout_sha256 != expected_layout_sha256:
+        raise DeviceError(
+            "The device partition table does not match this application build; "
+            "refusing to start OTA. Apply an authorized system update or run "
+            "'python mosaico.py recover' on the Gateway host.",
+            details={
+                "actual_partition_table_sha256": actual_layout_sha256,
+                "expected_partition_table_sha256": expected_layout_sha256,
+                "partition_table": str(artifacts.partition_table),
+            },
+        )
+    context.status(
+        f"partition table: verified {actual_layout_sha256[:12]}"
+    )
 
     context.status(f"ota: starting recovery-first installation ({arguments.validation})")
     operation = run_ota(
