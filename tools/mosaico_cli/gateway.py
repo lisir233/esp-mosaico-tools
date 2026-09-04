@@ -724,9 +724,17 @@ def _wait_gateway_operation(
         f"{int(progress.get('progress_permille') or 0) / 10:.1f}%"
     )
     if status not in {"succeeded", "success", "completed"}:
+        device_error = operation.get("error")
+        diagnostic = str(device_error).strip() if device_error else None
+        message = f"{action} failed: {status}"
+        if diagnostic:
+            message += f" ({diagnostic})"
+        details = {"result": operation, "log": str(context.log_path)}
+        if diagnostic:
+            details["diagnostic"] = diagnostic
         raise OperationError(
-            f"{action} failed: {status}",
-            details={"result": operation, "log": str(context.log_path)},
+            message,
+            details=details,
         )
     if isinstance(value, dict):
         value["operation"] = operation

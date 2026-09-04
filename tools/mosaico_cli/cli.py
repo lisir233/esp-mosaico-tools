@@ -337,6 +337,9 @@ def _emit_error(error: MosaicoError, json_output: bool, verbose: bool) -> None:
         build_log_dir = error.details.get("build_log_dir")
         if build_log_dir:
             print(f"Build logs: {build_log_dir}", file=sys.stderr)
+        log = error.details.get("log")
+        if log and not build_log_dir:
+            print(f"Log: {log}", file=sys.stderr)
         if verbose and error.details:
             print(json.dumps(error.details, ensure_ascii=False, indent=2), file=sys.stderr)
 

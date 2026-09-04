@@ -1151,6 +1151,49 @@ class GatewayTests(unittest.TestCase):
         messages = [call.args[0] for call in context.status.call_args_list]
         self.assertTrue(any("validating_plan" in message for message in messages))
 
+    def test_system_update_failure_exposes_gateway_error(self) -> None:
+        context = mock.Mock(log_path=Path("/runs/raw.log"))
+        context.run.return_value = subprocess.CompletedProcess(
+            [],
+            0,
+            json.dumps(
+                {
+                    "operation": {
+                        "operation_id": "system-operation-1",
+                        "status": "running",
+                    }
+                }
+            ),
+            "",
+        )
+        failed = {
+            "operation": {
+                "operation_id": "system-operation-1",
+                "status": "failed",
+                "error": "device partition-table SHA-256 is not authorized by the bundle",
+            }
+        }
+        session = GatewaySession(Path("python"), Path("iris"), (), None, False)
+        with ExitStack() as contexts:
+            contexts.enter_context(
+                mock.patch("mosaico_cli.gateway.gateway_json", return_value=failed)
+            )
+            contexts.enter_context(mock.patch("mosaico_cli.gateway.time.sleep"))
+            caught = contexts.enter_context(self.assertRaises(OperationError))
+            run_system_update_bundle(
+                context,
+                session,
+                device_id="device",
+                bundle=Path("release.irisfw"),
+                timeout=900,
+            )
+
+        self.assertIn("partition-table SHA-256", str(caught.exception))
+        self.assertEqual(
+            caught.exception.details["diagnostic"],
+            "device partition-table SHA-256 is not authorized by the bundle",
+        )
+
     def test_monitor_forces_unbuffered_child_output(self) -> None:
         arguments = argparse.Namespace(
             gateway_profile=None,
@@ -2260,6 +2303,52 @@ class RecoveryCommandTests(unittest.TestCase):
             progress("Writing at 0x00002000... ( 50 % )\n"),
             "flash: writing 50% at 0x00002000",
         )
+
+    def test_idf_wrapper_reports_bounded_cmake_diagnostic(self) -> None:
+        context = mock.Mock(repository=REPOSITORY, log_path=Path("/runs/raw.log"))
+        context.run.return_value = subprocess.CompletedProcess(
+            [],
+            1,
+            "noise before failure\n"
+            "CMake Error at tools/cmake/build.cmake:392 (message):\n"
+            "  Failed to resolve component 'missing_component' required by component\n"
+            "  'main': unknown name.\n"
+            "Call Stack (most recent call first):\n"
+            "  CMakeLists.txt:35 (project)\n",
+            None,
+        )
+        prepared = IdfEnvironment(
+            Path("/idf"),
+            Path("/idf-python"),
+            Path("/idf/tools/idf.py"),
+            {"PATH": "idf-tools"},
+        )
+        with ExitStack() as contexts:
+            contexts.enter_context(
+                mock.patch(
+                    "mosaico_cli.runtime.prepare_idf_environment", return_value=prepared
+                )
+            )
+            caught = contexts.enter_context(self.assertRaises(BuildError))
+            run_idf_target(
+                context,
+                idf_path=Path("/idf"),
+                project=Path("/project"),
+                build_dir=Path("/build"),
+                target="system-update-bundle",
+                timeout=180,
+            )
+
+        diagnostic = caught.exception.details["diagnostic"]
+        self.assertIn("Build diagnostic (cmake)", diagnostic)
+        self.assertIn("Failed to resolve component 'missing_component'", diagnostic)
+        self.assertNotIn("noise before failure", diagnostic)
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            _emit_error(caught.exception, json_output=False, verbose=False)
+        rendered = stderr.getvalue()
+        self.assertIn("Failed to resolve component 'missing_component'", rendered)
+        self.assertIn("Log: /runs/raw.log", rendered)
 
     def test_busy_recovery_port_is_reported_without_retry(self) -> None:
         context = mock.Mock(repository=REPOSITORY, log_path=Path("run.log"))

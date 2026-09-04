@@ -318,6 +318,71 @@ def _idf_progress_parser() -> Callable[[str], str | None]:
     return parse
 
 
+_IDF_ERROR_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "compiler",
+        re.compile(
+            r"^(?:[^:\n]+:)+\d+(?::\d+)?:\s+(?:fatal\s+)?error:\s+.+$",
+            re.IGNORECASE | re.MULTILINE,
+        ),
+    ),
+    (
+        "linker",
+        re.compile(
+            r"(?:undefined reference to|will not fit in region|region [`'\"]?.+[`'\"]? "
+            r"overflowed|collect2:\s*error|ld(?:\.exe)?:\s*error)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "partition",
+        re.compile(
+            r"(?:does not fit|too large for|exceeds .*partition|partition .* overflow|"
+            r"app partition is too small)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "cmake",
+        re.compile(
+            r"^(?:CMake Error|-- Configuring incomplete, errors occurred)",
+            re.IGNORECASE | re.MULTILINE,
+        ),
+    ),
+    ("python", re.compile(r"^Traceback \(most recent call last\):", re.MULTILINE)),
+    (
+        "generic",
+        re.compile(
+            r"^(?!ninja: build stopped)(?!FAILED:).*\b(?:fatal|error):\s+.+$",
+            re.IGNORECASE | re.MULTILINE,
+        ),
+    ),
+)
+_IDF_DIAGNOSTIC_CONTEXT_LINES = 20
+
+
+def _idf_failure_diagnostic(output: str) -> str | None:
+    """Return a bounded, useful root-cause excerpt from raw idf.py output."""
+
+    ansi = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
+    clean = ansi.sub("", output).replace("\r\n", "\n").replace("\r", "\n")
+    candidates: list[tuple[int, int, str]] = []
+    for priority, (category, pattern) in enumerate(_IDF_ERROR_PATTERNS):
+        match = pattern.search(clean)
+        if match:
+            candidates.append((match.start(), priority, category))
+    if not candidates:
+        return None
+
+    offset, _, category = min(candidates, key=lambda item: (item[0], item[1]))
+    lines = clean.splitlines()
+    line_number = clean.count("\n", 0, offset)
+    excerpt = lines[line_number : line_number + _IDF_DIAGNOSTIC_CONTEXT_LINES]
+    while excerpt and not excerpt[-1].strip():
+        excerpt.pop()
+    return f"Build diagnostic ({category}):\n" + "\n".join(excerpt)
+
+
 def run_idf_target(
     context: RunContext,
     *,
@@ -379,7 +444,8 @@ def run_idf_target(
                 "configuration mode.",
                 details={"log": str(context.log_path)},
             )
-        raise BuildError(
-            f"ESP-IDF target {target} failed.",
-            details={"log": str(context.log_path)},
-        )
+        details = {"log": str(context.log_path)}
+        diagnostic = _idf_failure_diagnostic(result.stdout or "")
+        if diagnostic:
+            details["diagnostic"] = diagnostic
+        raise BuildError(f"ESP-IDF target {target} failed.", details=details)
