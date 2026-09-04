@@ -424,6 +424,63 @@ def system_inventory(
     return {**inventory, "partition_table_sha256": partition_hash.lower()}
 
 
+def enter_recovery_and_wait(
+    context: RunContext,
+    session: GatewaySession,
+    device_id: str,
+    *,
+    previous_boot_id: str | int | None,
+    timeout: float,
+) -> dict[str, Any]:
+    """Enter retained Recovery and wait for the same device to reconnect."""
+
+    wait_timeout = min(max(timeout, 1), 30)
+    try:
+        gateway_json(
+            context,
+            session,
+            "factory",
+            device_id,
+            timeout=min(wait_timeout, 5),
+        )
+    except DeviceError:
+        # USB can disappear while Gateway is returning the accepted RPC. The
+        # reconnect observation below is authoritative for whether it worked.
+        pass
+
+    deadline = time.monotonic() + wait_timeout
+    while time.monotonic() < deadline:
+        try:
+            value = gateway_json(
+                context,
+                session,
+                "status",
+                device_id,
+                timeout=min(3, wait_timeout),
+            )
+        except DeviceError:
+            time.sleep(0.25)
+            continue
+        status = value.get("device", value) if isinstance(value, dict) else {}
+        boot_id = status.get("boot_id") if isinstance(status, dict) else None
+        if (
+            isinstance(status, dict)
+            and status.get("firmware_mode") == "recovery"
+            and (
+                previous_boot_id is None
+                or str(boot_id or "") != str(previous_boot_id)
+            )
+        ):
+            return status
+        time.sleep(0.25)
+
+    raise OperationError(
+        "The device accepted the Recovery transition but retained Recovery did "
+        "not reconnect with a new Boot ID within 30 seconds.",
+        details={"device_id": device_id, "log": str(context.log_path)},
+    )
+
+
 def acquire_maintenance_lease(
     context: RunContext,
     session: GatewaySession,

@@ -56,6 +56,7 @@ from mosaico_cli.gateway import (
     _require_compatible_gateway,
     acquire_endpoint_maintenance_lease,
     acquire_maintenance_lease,
+    enter_recovery_and_wait,
     ensure_gateway,
     ensure_iris_tools,
     iris_environment_root,
@@ -501,6 +502,34 @@ class GatewayTests(unittest.TestCase):
             ],
         ), self.assertRaises(DeviceError):
             system_inventory(mock.Mock(), mock.Mock(), "device-a")
+
+    def test_enter_recovery_waits_through_rpc_disconnect(self) -> None:
+        context = mock.Mock(log_path=Path("/runs/raw.log"))
+        session = mock.Mock()
+        with ExitStack() as contexts:
+            request = contexts.enter_context(
+                mock.patch(
+                    "mosaico_cli.gateway.gateway_json",
+                    side_effect=[
+                        DeviceError("USB disconnected"),
+                        {"device": {"firmware_mode": "normal", "boot_id": 10}},
+                        {"device": {"firmware_mode": "recovery", "boot_id": 11}},
+                    ],
+                )
+            )
+            contexts.enter_context(mock.patch("mosaico_cli.gateway.time.sleep"))
+            status = enter_recovery_and_wait(
+                context,
+                session,
+                "device-a",
+                previous_boot_id=10,
+                timeout=30,
+            )
+
+        self.assertEqual(status["firmware_mode"], "recovery")
+        self.assertEqual(status["boot_id"], 11)
+        self.assertEqual(request.call_args_list[0].args[2:], ("factory", "device-a"))
+        self.assertEqual(request.call_args_list[-1].args[2:], ("status", "device-a"))
 
     def test_local_system_update_builds_and_submits_atomic_bundle(self) -> None:
         with ExitStack() as _contexts:
@@ -1783,6 +1812,125 @@ class RecoveryCommandTests(unittest.TestCase):
             record.assert_called_once_with("device", "2.1.1-recovery", 123)
             inventory.assert_called_once_with(context, session, "device")
             ota.assert_called_once()
+
+    def test_install_enters_recovery_before_partition_preflight(self) -> None:
+        with ExitStack() as contexts:
+            temporary = contexts.enter_context(tempfile.TemporaryDirectory())
+            root = Path(temporary)
+            project = root / "project"
+            project.mkdir()
+            image = project / "app.bin"
+            image.write_bytes(b"firmware")
+            partition_table = project / "partition-table.bin"
+            partition_table.write_bytes(b"partition-table")
+            layout_sha256 = partition_table_flash_sha256(partition_table)
+            artifacts = SimpleNamespace(
+                image=image,
+                elf=project / "app.elf",
+                map_file=project / "app.map",
+                partition_table=partition_table,
+                project_name="app",
+                project_version="1.0.0",
+                target="esp32s31",
+            )
+            arguments = SimpleNamespace(
+                project=str(project),
+                skip_build=True,
+                gateway_profile=None,
+                device_id=None,
+                validation="elf-sha256",
+                timeout=30,
+            )
+            context = RunContext(
+                workspace_for(root), "normal-install-test", json_output=True
+            )
+            session = SimpleNamespace(started_local=False)
+            normal = {
+                "device_id": "device",
+                "firmware_mode": "normal",
+                "boot_id": 10,
+            }
+            recovery = {
+                "device_id": "device",
+                "firmware_mode": "recovery",
+                "app_version": "2.1.1-recovery",
+                "capability_names": ["ota"],
+                "boot_id": 11,
+            }
+            order: list[str] = []
+            with ExitStack() as patches:
+                patches.enter_context(
+                    mock.patch("mosaico_cli.commands.resolve_project", return_value=project)
+                )
+                patches.enter_context(
+                    mock.patch(
+                        "mosaico_cli.commands.discover_artifacts", return_value=artifacts
+                    )
+                )
+                patches.enter_context(
+                    mock.patch(
+                        "mosaico_cli.commands.load_bundle",
+                        return_value={"version": "2.1.1-recovery"},
+                    )
+                )
+                patches.enter_context(
+                    mock.patch("mosaico_cli.commands.ensure_gateway", return_value=session)
+                )
+                patches.enter_context(
+                    mock.patch("mosaico_cli.commands.connected_devices", return_value=[normal])
+                )
+                patches.enter_context(
+                    mock.patch("mosaico_cli.commands.gateway_json", return_value=normal)
+                )
+                patches.enter_context(
+                    mock.patch(
+                        "mosaico_cli.commands.recovery_verification_details",
+                        side_effect=[
+                            (True, {"source": "persistent_record"}),
+                            (True, {"source": "live_recovery"}),
+                        ],
+                    )
+                )
+                enter = patches.enter_context(
+                    mock.patch(
+                        "mosaico_cli.commands.enter_recovery_and_wait",
+                        side_effect=lambda *args, **kwargs: (
+                            order.append("recovery") or recovery
+                        ),
+                    )
+                )
+                inventory = patches.enter_context(
+                    mock.patch(
+                        "mosaico_cli.commands.system_inventory",
+                        side_effect=lambda *args, **kwargs: (
+                            order.append("inventory")
+                            or {"partition_table_sha256": layout_sha256}
+                        ),
+                    )
+                )
+                ota = patches.enter_context(
+                    mock.patch(
+                        "mosaico_cli.commands.run_ota",
+                        side_effect=lambda *args, **kwargs: order.append("ota") or {},
+                    )
+                )
+                record = patches.enter_context(
+                    mock.patch("mosaico_cli.commands.record_recovery_verification")
+                )
+                result = install(arguments, context)
+
+            self.assertEqual(result["status"], "succeeded")
+            self.assertEqual(order, ["recovery", "inventory", "ota"])
+            enter.assert_called_once_with(
+                context,
+                session,
+                "device",
+                previous_boot_id=10,
+                timeout=30,
+            )
+            inventory.assert_called_once_with(context, session, "device")
+            ota.assert_called_once()
+            record.assert_called_once_with("device", "2.1.1-recovery", 11)
 
     def test_install_rejects_mismatched_partition_table_before_ota(self) -> None:
         with ExitStack() as _contexts:

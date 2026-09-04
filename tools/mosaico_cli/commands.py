@@ -18,6 +18,7 @@ from .gateway import (
     acquire_endpoint_maintenance_lease,
     acquire_maintenance_lease,
     connected_devices,
+    enter_recovery_and_wait,
     ensure_gateway,
     finish_maintenance_lease,
     gateway_devices,
@@ -357,6 +358,29 @@ def install(arguments: Any, context: RunContext) -> dict[str, Any]:
             "Run 'python mosaico.py recover' first. "
             f"Verification details: {json.dumps(verification, ensure_ascii=False)}"
         )
+    if status.get("firmware_mode") != "recovery":
+        context.status("recovery: entering retained Recovery")
+        status = enter_recovery_and_wait(
+            context,
+            session,
+            device_id,
+            previous_boot_id=device.get("boot_id"),
+            timeout=arguments.timeout,
+        )
+        recovery_verified, verification = recovery_verification_details(
+            device_id, status, recovery_version, workspace
+        )
+        context.note(
+            "live recovery verification: "
+            + json.dumps(verification, ensure_ascii=False, sort_keys=True)
+        )
+        if not recovery_verified:
+            raise RecoveryRequiredError(
+                "The device entered Recovery, but the live Recovery service did "
+                "not match the reviewed workspace bundle. Run "
+                "'python mosaico.py recover' first. "
+                f"Verification details: {json.dumps(verification, ensure_ascii=False)}"
+            )
     if status.get("firmware_mode") == "recovery":
         try:
             record_recovery_verification(
