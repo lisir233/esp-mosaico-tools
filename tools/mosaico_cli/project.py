@@ -39,12 +39,7 @@ def _is_idf_project(path: Path) -> bool:
 
 
 def _recovery_projects(workspace: WorkspaceConfig) -> set[Path]:
-    projects: set[Path] = set()
-    for model in workspace.devices:
-        value = model.get("recovery_project")
-        if isinstance(value, str) and value:
-            projects.add(workspace.resolve(value))
-    return projects
+    return {workspace.recovery_project.resolve()}
 
 
 def resolve_project(
@@ -62,17 +57,22 @@ def resolve_project(
             raise SelectionError(f"Not a valid ESP-IDF project: {path}")
         if path in recovery_projects:
             raise SelectionError(
-                "The factory project contains Recovery firmware only and cannot "
+                "The tools-owned Recovery project cannot "
                 "be installed as an application."
             )
         return path
 
     current = cwd.resolve()
+    if current in recovery_projects:
+        raise SelectionError(
+            "The tools-owned Recovery project cannot be used as an application; "
+            "select an application project with --project PATH."
+        )
     while current == repository or repository in current.parents:
         if current != repository and current in recovery_projects:
             raise SelectionError(
-                "The factory project contains Recovery firmware only; select an "
-                "application project with --project PATH."
+                "The tools-owned Recovery project cannot be used as an application; "
+                "select an application project with --project PATH."
             )
         if current != repository and _is_idf_project(current):
             return current
@@ -99,7 +99,7 @@ def resolve_project(
     if not candidates:
         raise SelectionError(
             "No application project was found. Specify one with --project PATH; "
-            "the Recovery-only factory project is never selected automatically."
+            "the tools-owned Recovery project is never selected automatically."
         )
     raise SelectionError(
         "Multiple application projects were found; specify one with --project PATH.",

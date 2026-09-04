@@ -323,7 +323,7 @@ def install(arguments: Any, context: RunContext) -> dict[str, Any]:
         f"({artifacts.image.stat().st_size} bytes, {artifacts.target})"
     )
     model = select_model(workspace, None)
-    recovery_manifest = load_bundle(workspace.resolve(model.recovery_dir), model.target)
+    recovery_manifest = load_bundle(workspace.recovery_dir, model.target)
     if artifacts.target != model.target:
         raise BuildError(
             f"The project target is {artifacts.target!r}, but the device requires "
@@ -468,8 +468,8 @@ def recover(arguments: Any, context: RunContext) -> dict[str, Any]:
     context.status(
         f"recovery: model={model.id} target={model.target} source={arguments.source}"
     )
-    recovery_project = workspace.resolve(model.recovery_project)
-    bundle_dir = workspace.resolve(model.recovery_dir)
+    recovery_project = workspace.recovery_project
+    bundle_dir = workspace.recovery_dir
     manifest: dict[str, Any] | None = None
     if arguments.source == "reviewed":
         manifest = load_bundle(bundle_dir, model.target)
@@ -556,13 +556,18 @@ def recover(arguments: Any, context: RunContext) -> dict[str, Any]:
         raise DeviceError("The local Gateway is required to verify Recovery.")
 
     context.status("bundle: preparing all Recovery artifacts before device maintenance")
+    recovery_definitions = {
+        "MOSAICO_RECOVERY_SOURCE": arguments.source,
+        "MOSAICO_BSP_PATH": str(workspace.bsp_path),
+        "MOSAICO_ESP_IRIS_PATH": str(workspace.esp_iris_path),
+    }
     run_idf_target(
         context,
         idf_path=idf_path,
         project=recovery_project,
         build_dir=build_dir,
         target="mosaico-recover-prepare",
-        definitions={"MOSAICO_RECOVERY_SOURCE": arguments.source},
+        definitions=recovery_definitions,
         timeout=arguments.timeout,
     )
     prepared_dir = build_dir / (
@@ -632,7 +637,7 @@ def recover(arguments: Any, context: RunContext) -> dict[str, Any]:
             project=recovery_project,
             build_dir=build_dir,
             target="mosaico-recover-flash",
-            definitions={"MOSAICO_RECOVERY_SOURCE": arguments.source},
+            definitions=recovery_definitions,
             port=port,
             timeout=arguments.timeout,
         )

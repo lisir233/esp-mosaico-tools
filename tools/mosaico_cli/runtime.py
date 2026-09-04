@@ -174,12 +174,7 @@ def resolve_idf_path(workspace: WorkspaceConfig, project: Path | None = None) ->
     environment = os.environ.get("IDF_PATH")
     if environment:
         candidates.append(Path(environment))
-    recovery_projects = [
-        workspace.resolve(str(model["recovery_project"]))
-        for model in workspace.devices
-        if model.get("recovery_project")
-    ]
-    for owner in (project, *recovery_projects):
+    for owner in (project, workspace.recovery_project):
         if owner is None:
             continue
         description = owner / "build" / "project_description.json"

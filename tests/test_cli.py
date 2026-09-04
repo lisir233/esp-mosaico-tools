@@ -109,7 +109,6 @@ def workspace_for(root: Path, *, default_project: Path | None = None) -> Workspa
         default_project=default_project,
         environment_file=root / "Environment",
         run_dir=root / ".codex-runs" / "mosaico",
-        idf_constraint_manifest=root / "projects" / "factory" / "main" / "idf_component.yml",
         bsp_path=root / "submodule" / "esp-mosaico-bsp",
         esp_iris_path=root / "submodule" / "esp-iris",
     )
@@ -1530,37 +1529,34 @@ class ProjectTests(unittest.TestCase):
             temporary = _contexts.enter_context(tempfile.TemporaryDirectory())
             root = Path(temporary)
             expected = self._project(root, "demo")
-            self._project(root, "factory")
             self.assertEqual(resolve_project(workspace_for(root), None, root), expected)
 
-    def test_factory_is_not_implicitly_selected(self) -> None:
-        with ExitStack() as _contexts:
-            temporary = _contexts.enter_context(tempfile.TemporaryDirectory())
-            root = Path(temporary)
-            self._project(root, "factory")
-            with ExitStack() as _contexts:
-                _contexts.enter_context(self.assertRaises(SelectionError))
-                resolve_project(workspace_for(root), None, root)
-
-    def test_factory_cannot_be_selected_explicitly(self) -> None:
+    def test_user_project_named_factory_is_allowed(self) -> None:
         with ExitStack() as _contexts:
             temporary = _contexts.enter_context(tempfile.TemporaryDirectory())
             root = Path(temporary)
             factory = self._project(root, "factory")
-            with ExitStack() as _contexts:
-                caught = _contexts.enter_context(self.assertRaises(SelectionError))
-                resolve_project(workspace_for(root), str(factory), root)
-            self.assertIn("Recovery firmware only", str(caught.exception))
+            self.assertEqual(resolve_project(workspace_for(root), None, root), factory)
 
-    def test_factory_cannot_be_selected_from_its_working_directory(self) -> None:
+    def test_tools_recovery_cannot_be_selected_explicitly(self) -> None:
         with ExitStack() as _contexts:
             temporary = _contexts.enter_context(tempfile.TemporaryDirectory())
             root = Path(temporary)
-            factory = self._project(root, "factory")
+            workspace = workspace_for(root)
             with ExitStack() as _contexts:
                 caught = _contexts.enter_context(self.assertRaises(SelectionError))
-                resolve_project(workspace_for(root), None, factory)
-            self.assertIn("Recovery firmware only", str(caught.exception))
+                resolve_project(workspace, str(workspace.recovery_project), root)
+            self.assertIn("tools-owned Recovery project", str(caught.exception))
+
+    def test_tools_recovery_cannot_be_selected_from_its_working_directory(self) -> None:
+        with ExitStack() as _contexts:
+            temporary = _contexts.enter_context(tempfile.TemporaryDirectory())
+            root = Path(temporary)
+            workspace = workspace_for(root)
+            with ExitStack() as _contexts:
+                caught = _contexts.enter_context(self.assertRaises(SelectionError))
+                resolve_project(workspace, None, workspace.recovery_project)
+            self.assertIn("tools-owned Recovery project", str(caught.exception))
 
     def test_multiple_projects_require_selection(self) -> None:
         with ExitStack() as _contexts:
@@ -2226,11 +2222,19 @@ class RecoveryCommandTests(unittest.TestCase):
         )
         self.assertEqual(
             target.call_args_list[0].kwargs["definitions"],
-            {"MOSAICO_RECOVERY_SOURCE": "reviewed"},
+            {
+                "MOSAICO_RECOVERY_SOURCE": "reviewed",
+                "MOSAICO_BSP_PATH": str(WORKSPACE.bsp_path),
+                "MOSAICO_ESP_IRIS_PATH": str(WORKSPACE.esp_iris_path),
+            },
         )
         self.assertEqual(
             target.call_args_list[1].kwargs["definitions"],
-            {"MOSAICO_RECOVERY_SOURCE": "reviewed"},
+            {
+                "MOSAICO_RECOVERY_SOURCE": "reviewed",
+                "MOSAICO_BSP_PATH": str(WORKSPACE.bsp_path),
+                "MOSAICO_ESP_IRIS_PATH": str(WORKSPACE.esp_iris_path),
+            },
         )
         self.assertEqual(
             target.call_args_list[1].kwargs["port"], "/dev/serial/by-path/device-a"

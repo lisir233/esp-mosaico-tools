@@ -15,9 +15,6 @@ class DeviceModel:
     status: str
     default: bool
     preview_target: bool
-    recovery_project: str
-    bsp_path: str
-    recovery_dir: str
     recovery_usb_ids: list[dict[str, str]]
 
 

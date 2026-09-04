@@ -107,7 +107,7 @@ def diagnose_host(workspace: WorkspaceConfig) -> dict[str, Any]:
     }
     try:
         model = select_model(workspace, None)
-        recovery_project = workspace.resolve(model.recovery_project)
+        recovery_project = workspace.recovery_project
         idf_path = resolve_idf_path(workspace, recovery_project)
         prepared = prepare_idf_environment(idf_path)
         idf.update(

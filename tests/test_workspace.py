@@ -22,7 +22,6 @@ def configuration() -> dict[str, object]:
             "default_project": "apps/demo",
             "environment_file": "Environment",
             "run_dir": ".runs",
-            "idf_constraint_manifest": "recovery/main/idf_component.yml",
         },
         "dependencies": {
             "bsp": "third_party/bsp",
@@ -37,9 +36,6 @@ def configuration() -> dict[str, object]:
                 "status": "supported",
                 "default": True,
                 "preview_target": True,
-                "recovery_project": "recovery",
-                "bsp_path": "third_party/bsp",
-                "recovery_dir": "recovery/prebuilt",
                 "recovery_usb_ids": [],
             }
         ],
@@ -64,6 +60,14 @@ class WorkspaceTests(unittest.TestCase):
                 workspace.esp_iris_path, (root / "third_party" / "esp-iris").resolve()
             )
             self.assertTrue(str(workspace.build_runner).startswith(str(TOOL_ROOT)))
+            self.assertEqual(
+                workspace.recovery_project,
+                TOOL_ROOT / "firmware" / "recovery",
+            )
+            self.assertEqual(
+                workspace.recovery_dir,
+                TOOL_ROOT / "firmware" / "recovery" / "prebuilt" / "recovery",
+            )
 
     def test_explicit_workspace_accepts_config_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

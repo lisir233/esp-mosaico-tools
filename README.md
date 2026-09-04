@@ -6,8 +6,10 @@ firmware workspace; it does not require the CLI package to be installed into
 the user's Python environment.
 
 The consuming repository owns a `.mosaico.json` file. All configured relative
-paths are resolved from the directory containing that file, while built-in
-tool resources are resolved from this checkout.
+paths are resolved from the directory containing that file. Recovery firmware
+source and its reviewed bundle live under `firmware/recovery` and are resolved
+from this checkout so the CLI and Recovery implementation are versioned
+together.
 
 ```sh
 python3 submodule/esp-mosaico-tools/mosaico.py doctor

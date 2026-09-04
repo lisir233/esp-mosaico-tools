@@ -26,7 +26,6 @@ class WorkspaceConfig:
     default_project: Path | None
     environment_file: Path
     run_dir: Path
-    idf_constraint_manifest: Path
     bsp_path: Path
     esp_iris_path: Path
     build_runner: Path
@@ -35,6 +34,20 @@ class WorkspaceConfig:
     def resolve(self, value: str) -> Path:
         path = Path(value).expanduser()
         return path.resolve() if path.is_absolute() else (self.root / path).resolve()
+
+    @property
+    def recovery_project(self) -> Path:
+        """Return the Recovery firmware source bundled with this tool version."""
+        return self.tool_root / "firmware" / "recovery"
+
+    @property
+    def recovery_dir(self) -> Path:
+        """Return the reviewed Recovery bundle bundled with this tool version."""
+        return self.recovery_project / "prebuilt" / "recovery"
+
+    @property
+    def idf_constraint_manifest(self) -> Path:
+        return self.recovery_project / "main" / "idf_component.yml"
 
 
 def _object(value: Any, name: str) -> dict[str, Any]:
@@ -150,10 +163,6 @@ def load_workspace(
         run_dir=workspace_path(
             workspace.get("run_dir", ".codex-runs/mosaico"),
             "workspace.run_dir",
-        ),
-        idf_constraint_manifest=workspace_path(
-            workspace.get("idf_constraint_manifest"),
-            "workspace.idf_constraint_manifest",
         ),
         bsp_path=workspace_path(dependencies.get("bsp"), "dependencies.bsp"),
         esp_iris_path=workspace_path(
