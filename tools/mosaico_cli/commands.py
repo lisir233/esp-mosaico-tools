@@ -13,7 +13,14 @@ from threading import Thread
 import time
 from typing import Any, TextIO
 
-from .errors import BuildError, DeviceError, OperationError, RecoveryRequiredError, SelectionError
+from .errors import (
+    BuildError,
+    DeviceError,
+    EnvironmentError,
+    OperationError,
+    RecoveryRequiredError,
+    SelectionError,
+)
 from .gateway import (
     acquire_endpoint_maintenance_lease,
     acquire_maintenance_lease,
@@ -556,10 +563,23 @@ def recover(arguments: Any, context: RunContext) -> dict[str, Any]:
         raise DeviceError("The local Gateway is required to verify Recovery.")
 
     context.status("bundle: preparing all Recovery artifacts before device maintenance")
+    recovery_components = (
+        workspace.bsp_path / "components" / "esp-mosaico-bsp",
+        workspace.esp_iris_path / "components" / "esp_iris",
+    )
+    missing_components = [
+        str(path) for path in recovery_components if not (path / "CMakeLists.txt").is_file()
+    ]
+    if missing_components:
+        raise EnvironmentError(
+            "Required Recovery components are unavailable.",
+            details={"missing": missing_components},
+        )
     recovery_definitions = {
         "MOSAICO_RECOVERY_SOURCE": arguments.source,
-        "MOSAICO_BSP_PATH": str(workspace.bsp_path),
-        "MOSAICO_ESP_IRIS_PATH": str(workspace.esp_iris_path),
+        "EXTRA_COMPONENT_DIRS": ";".join(
+            path.resolve().as_posix() for path in recovery_components
+        ),
     }
     run_idf_target(
         context,

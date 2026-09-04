@@ -118,3 +118,7 @@ offset 和 size 均属于固定布局契约。
 由 `mosaico.py recover` 管理；普通应用始终由 `mosaico.py install` 通过
 ESP-Iris 安装。评审包包含完整哈希与布局约束，只有通过构建校验和真机验收后
 才应发布。
+
+Recovery 工程不依赖 tools 私有的组件路径变量。集成到其他 workspace 时，通过
+标准 ESP-IDF `EXTRA_COMPONENT_DIRS` 提供 `esp-mosaico-bsp` 和 `esp_iris`
+组件；`mosaico.py recover` 会根据宿主 workspace 的 `.mosaico.json` 自动注入。

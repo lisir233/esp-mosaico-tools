@@ -2224,16 +2224,32 @@ class RecoveryCommandTests(unittest.TestCase):
             target.call_args_list[0].kwargs["definitions"],
             {
                 "MOSAICO_RECOVERY_SOURCE": "reviewed",
-                "MOSAICO_BSP_PATH": str(WORKSPACE.bsp_path),
-                "MOSAICO_ESP_IRIS_PATH": str(WORKSPACE.esp_iris_path),
+                "EXTRA_COMPONENT_DIRS": ";".join(
+                    (
+                        (WORKSPACE.bsp_path / "components" / "esp-mosaico-bsp")
+                        .resolve()
+                        .as_posix(),
+                        (WORKSPACE.esp_iris_path / "components" / "esp_iris")
+                        .resolve()
+                        .as_posix(),
+                    )
+                ),
             },
         )
         self.assertEqual(
             target.call_args_list[1].kwargs["definitions"],
             {
                 "MOSAICO_RECOVERY_SOURCE": "reviewed",
-                "MOSAICO_BSP_PATH": str(WORKSPACE.bsp_path),
-                "MOSAICO_ESP_IRIS_PATH": str(WORKSPACE.esp_iris_path),
+                "EXTRA_COMPONENT_DIRS": ";".join(
+                    (
+                        (WORKSPACE.bsp_path / "components" / "esp-mosaico-bsp")
+                        .resolve()
+                        .as_posix(),
+                        (WORKSPACE.esp_iris_path / "components" / "esp_iris")
+                        .resolve()
+                        .as_posix(),
+                    )
+                ),
             },
         )
         self.assertEqual(
