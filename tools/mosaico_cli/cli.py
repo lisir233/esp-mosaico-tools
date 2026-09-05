@@ -197,6 +197,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--device-id", help="Device ID used to correlate identity before and after recovery"
     )
     recover_parser.add_argument(
+        "--recovery-port", help="Explicit independent USB Serial/JTAG 303A:1001 port; requires a live managed device"
+    )
+    recover_parser.add_argument(
         "--timeout", type=positive_timeout, default=180.0,
         help="Recovery and validation timeout in seconds",
     )

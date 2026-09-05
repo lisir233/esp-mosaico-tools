@@ -44,6 +44,7 @@ from .recovery import (
     record_recovery_verification,
     recovery_verification_details,
 )
+from .recovery_port import lease_port, same_port, serial_jtag_candidate
 from .registry import select_model
 from .runtime import RunContext, build_application, resolve_idf_path, run_idf_target
 
@@ -533,6 +534,18 @@ def recover(arguments: Any, context: RunContext) -> dict[str, Any]:
             "gateway: managed device unavailable; checking the recovery interface"
         )
 
+    independent_port = getattr(arguments, "recovery_port", None)
+    independent_identity = None
+    if independent_port:
+        if prior_device is None or prior_session is None:
+            raise DeviceError("--recovery-port requires a live managed Device ID before flashing.")
+        live = _device_status(gateway_json(context, prior_session, "status", prior_device_id))
+        if live.get("device_id") != prior_device_id or not live.get("boot_id"):
+            raise DeviceError("The managed device did not provide live Device ID and Boot ID evidence.")
+        prior_boot_id = str(live["boot_id"])
+        independent_identity = serial_jtag_candidate(independent_port)
+        context.status(f"device: explicit independent USB Serial/JTAG at {independent_identity['path']}")
+
     unowned_port: str | None = None
     if prior_device is None:
         context.status("device: detecting a unique unowned ROM configuration interface")
@@ -550,6 +563,8 @@ def recover(arguments: Any, context: RunContext) -> dict[str, Any]:
         "device_id": prior_device_id,
         "target": model.target,
         "recovery_version": manifest.get("version") if manifest else "current-source",
+        "recovery_port": independent_identity,
+        "previous_boot_id": prior_boot_id,
         "checks": {
             "idf": str(idf_path),
             "bundle_verified": manifest is not None,
@@ -600,97 +615,89 @@ def recover(arguments: Any, context: RunContext) -> dict[str, Any]:
     expected_version = str(prepared_manifest.get("version") or "")
 
     lease: dict[str, Any] | None = None
+    auxiliary_lease: dict[str, Any] | None = None
     lease_finished = False
-    if prior_device is not None and prior_device_id:
-        context.status(f"gateway: acquiring maintenance lease for {prior_device_id}")
-        lease = acquire_maintenance_lease(
-            context,
-            prior_session,
-            device_id=prior_device_id,
-            expected_version=expected_version,
-            timeout=arguments.timeout,
-        )
-        endpoint = lease.get("endpoint", {})
-        if not isinstance(endpoint, dict):
-            raise DeviceError("The maintenance lease did not include a physical endpoint.")
-        port = str(endpoint.get("path") or "")
-        if not port:
-            raw_endpoint = str(endpoint.get("endpoint") or "")
-            port = raw_endpoint[len("usb:") :] if raw_endpoint.startswith("usb:") else ""
-        if not port:
-            raise DeviceError("The maintenance lease did not include a writable local port.")
-        context.status(f"device: leased recovery interface ready at {port}")
-    else:
-        assert unowned_port is not None
-        context.status(f"gateway: acquiring maintenance lease for endpoint {unowned_port}")
-        lease = acquire_endpoint_maintenance_lease(
-            context,
-            prior_session,
-            endpoint=unowned_port,
-            expected_version=expected_version,
-            timeout=arguments.timeout,
-        )
-        endpoint = lease.get("endpoint", {})
-        if not isinstance(endpoint, dict):
-            raise DeviceError("The maintenance lease did not include a physical endpoint.")
-        port = str(endpoint.get("path") or "")
-        if not port:
-            raw_endpoint = str(endpoint.get("endpoint") or "")
-            port = (
-                raw_endpoint[len("usb:") :]
-                if raw_endpoint.startswith("usb:")
-                else ""
-            )
-        if not port:
-            raise DeviceError("The maintenance lease did not include a writable local port.")
-        context.status(f"device: leased recovery interface ready at {port}")
-
+    auxiliary_finished = False
     try:
-        if lease is not None:
-            renew_maintenance_lease(
-                context,
-                prior_session,
-                lease,
-                ttl_seconds=arguments.timeout + 60,
+        if prior_device is not None and prior_device_id:
+            context.status(f"gateway: acquiring maintenance lease for {prior_device_id}")
+            lease = acquire_maintenance_lease(
+                context, prior_session, device_id=prior_device_id,
+                expected_version=expected_version, timeout=arguments.timeout,
             )
-        context.status("flash: writing the prepared complete Recovery bundle")
+        else:
+            assert unowned_port is not None
+            lease = acquire_endpoint_maintenance_lease(
+                context, prior_session, endpoint=unowned_port,
+                expected_version=expected_version, timeout=arguments.timeout,
+            )
+        port = lease_port(lease)
+        if independent_identity is not None:
+            evidence = lease.get("evidence", {})
+            before = evidence.get("device_before", {}) if isinstance(evidence, dict) else {}
+            if before.get("device_id") != prior_device_id or not before.get("boot_id"):
+                raise DeviceError("Device maintenance lease lacks matching live identity evidence.")
+            prior_boot_id = str(before["boot_id"])
+            plan["previous_boot_id"] = prior_boot_id
+            if same_port(port, independent_identity["path"]):
+                raise DeviceError("--recovery-port must be independent of the managed USB endpoint.")
+            auxiliary_lease = acquire_endpoint_maintenance_lease(
+                context, prior_session, endpoint=independent_identity["path"],
+                expected_version=expected_version, timeout=arguments.timeout,
+            )
+            if not same_port(lease_port(auxiliary_lease), independent_identity["path"]):
+                raise DeviceError("Gateway leased a different recovery endpoint.")
+            auxiliary_evidence = auxiliary_lease.get("evidence", {})
+            attached_id = auxiliary_evidence.get("expected_device_id") if isinstance(auxiliary_evidence, dict) else None
+            if attached_id and attached_id != prior_device_id:
+                raise DeviceError("Independent endpoint is owned by a different live device.")
+            port = independent_identity["path"]
+            # Re-enumerate after bundle preparation and both leases, before reset/write.
+            if serial_jtag_candidate(port) != independent_identity:
+                raise DeviceError("USB Serial/JTAG identity changed during Recovery preparation.")
+            (context.directory / "recovery-route.json").write_text(json.dumps({
+                "device_id": prior_device_id, "previous_boot_id": prior_boot_id,
+                "managed_lease_id": lease["lease_id"],
+                "independent_lease_id": auxiliary_lease["lease_id"],
+                "write_endpoint": independent_identity,
+                "association": "explicit operator selection; no MAC inference",
+            }, indent=2) + "\n", encoding="utf-8")
+        for active in (lease, auxiliary_lease):
+            if active is not None:
+                renew_maintenance_lease(context, prior_session, active,
+                                        ttl_seconds=arguments.timeout + 60)
+        context.status(f"flash: writing the prepared complete Recovery bundle via {port}")
         run_idf_target(
-            context,
-            idf_path=idf_path,
-            project=recovery_project,
-            build_dir=build_dir,
-            target="mosaico-recover-flash",
-            definitions=recovery_definitions,
-            port=port,
-            timeout=arguments.timeout,
+            context, idf_path=idf_path, project=recovery_project,
+            build_dir=build_dir, target="mosaico-recover-flash",
+            definitions=recovery_definitions, port=port, timeout=arguments.timeout,
         )
-        context.status("flash: ESP-IDF write completed successfully")
-        context.status("gateway: reattaching and verifying the leased device")
+        context.status("gateway: verifying Recovery on the original managed Device ID")
         completed = finish_maintenance_lease(
-            context,
-            prior_session,
-            lease,
-            abort=False,
-            timeout=arguments.timeout,
+            context, prior_session, lease, abort=False, timeout=arguments.timeout,
         )
         lease_finished = True
         evidence = completed.get("evidence", {})
         status = evidence.get("verification", {}) if isinstance(evidence, dict) else {}
+        if independent_identity is not None:
+            if (status.get("device_id") != prior_device_id
+                    or not status.get("boot_id") or str(status["boot_id"]) == prior_boot_id
+                    or status.get("firmware_mode") != "recovery"
+                    or status.get("app_version") != expected_version):
+                raise OperationError("Independent-port Recovery did not verify the same device, new boot and expected Recovery firmware.")
+            # The auxiliary endpoint is a transport reservation, not a second
+            # firmware acceptance authority. Release it only after HS-USB verifies.
+            finish_maintenance_lease(context, prior_session, auxiliary_lease,
+                                     abort=True, timeout=min(arguments.timeout, 30))
+            auxiliary_finished = True
     except BaseException:
-        if lease is not None and not lease_finished:
-            context.status("gateway: aborting maintenance lease and reattaching the device")
-            try:
-                finish_maintenance_lease(
-                    context,
-                    prior_session,
-                    lease,
-                    abort=True,
-                    timeout=min(arguments.timeout, 30),
-                )
-            except (DeviceError, OperationError):
-                context.note(
-                    "warning: maintenance lease remains quarantined; inspect the local Gateway"
-                )
+        for active, finished in ((lease, lease_finished), (auxiliary_lease, auxiliary_finished)):
+            if active is not None and not finished:
+                try:
+                    finish_maintenance_lease(context, prior_session, active,
+                                             abort=True, timeout=min(arguments.timeout, 30))
+                except (DeviceError, OperationError):
+                    context.note("warning: maintenance lease remains quarantined; inspect the local Gateway")
         raise
 
     verified_device_id = str(status.get("device_id") or prior_device_id or "")
@@ -713,6 +720,7 @@ def recover(arguments: Any, context: RunContext) -> dict[str, Any]:
         "boot_id": status.get("boot_id"),
         "gateway_started": prior_session.started_local,
         "maintenance_lease_id": lease.get("lease_id") if lease else None,
+        "recovery_endpoint_lease_id": auxiliary_lease.get("lease_id") if auxiliary_lease else None,
     }
 
 
