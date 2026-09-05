@@ -1,5 +1,9 @@
 dependencies:
   idf: ">=6.1"
+  esp_iris:
+    git: https://github.com/lisir233/ESP-Iris.git
+    path: components/esp_iris
+    version: b484e47df74b105713cdec466c7622cd664a2c77
   esp-mosaico-bsp:
     git: https://github.com/esp-mosaico/esp-mosaico-bsp
     path: components/esp-mosaico-bsp
