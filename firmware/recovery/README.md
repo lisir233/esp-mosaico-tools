@@ -119,8 +119,8 @@ offset 和 size 均属于固定布局契约。
 ESP-Iris 安装。评审包包含完整哈希与布局约束，只有通过构建校验和真机验收后
 才应发布。
 
-Recovery 工程不依赖 tools 私有的组件路径变量。BSP 依赖由组件 manifest 指向
-`https://github.com/esp-mosaico/esp-mosaico-bsp`；集成到 ESP-Mosaico workspace
-时，`mosaico.py recover` 仍会根据宿主 workspace 的 `.mosaico.json`，通过标准
-ESP-IDF `EXTRA_COMPONENT_DIRS` 注入本地 `esp-mosaico-bsp` 和 `esp_iris` 组件，
-以便使用 workspace 锁定的源码。
+Recovery 工程直接使用 tools 仓库锁定的嵌套 `submodule/esp-iris`。BSP 依赖由组件
+manifest 指向 `https://github.com/esp-mosaico/esp-mosaico-bsp`；集成到
+ESP-Mosaico workspace 时，`mosaico.py recover` 会根据宿主 workspace 的
+`.mosaico.json` 注入本地 `esp-mosaico-bsp`，并复用 tools 锁定的 ESP-Iris，
+保证 Recovery、设备工具与普通应用使用同一 Iris 版本。

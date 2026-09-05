@@ -9,7 +9,8 @@ The consuming repository owns a `.mosaico.json` file. All configured relative
 paths are resolved from the directory containing that file. Recovery firmware
 source and its reviewed bundle live under `firmware/recovery` and are resolved
 from this checkout so the CLI and Recovery implementation are versioned
-together.
+together. ESP-Iris is pinned as this repository's nested Git submodule, making
+the tools checkout the single source of its device-side Iris implementation.
 
 ```sh
 python3 submodule/esp-mosaico-tools/mosaico.py doctor

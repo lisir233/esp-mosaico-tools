@@ -1,0 +1,3 @@
+[submodule "submodule/esp-iris"]
+	path = submodule/esp-iris
+	url = https://github.com/lisir233/ESP-Iris.git
