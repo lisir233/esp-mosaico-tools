@@ -569,6 +569,12 @@ class GatewayTests(unittest.TestCase):
             )
             _contexts.enter_context(
                 mock.patch(
+                    "mosaico_cli.commands.ensure_iris_tools",
+                    return_value=(Path("/iris-python"), Path("/iris-tool")),
+                )
+            )
+            _contexts.enter_context(
+                mock.patch(
                     "mosaico_cli.commands.discover_artifacts",
                     return_value=artifacts,
                 )
@@ -600,6 +606,10 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(result["source"], "local_build")
         self.assertEqual(result["bundle"], str(bundle))
         self.assertEqual(build.call_args.kwargs["target"], "system-update-bundle")
+        self.assertEqual(
+            build.call_args.kwargs["definitions"],
+            {"ESP_IRIS_PYTHON": "/iris-python"},
+        )
         submit.assert_called_once_with(
             context,
             session,

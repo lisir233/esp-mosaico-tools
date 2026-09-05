@@ -27,6 +27,7 @@ from .gateway import (
     connected_devices,
     enter_recovery_and_wait,
     ensure_gateway,
+    ensure_iris_tools,
     finish_maintenance_lease,
     gateway_devices,
     gateway_json,
@@ -209,12 +210,14 @@ def start_system_update(arguments: Any, context: RunContext) -> dict[str, Any]:
         context.status(f"project: {project}")
         if not skip_build:
             context.status("system update: building ota_0 + ui_apps + system bundle")
+            iris_python, _ = ensure_iris_tools(context)
             run_idf_target(
                 context,
                 idf_path=resolve_idf_path(context.workspace, project),
                 project=project,
                 build_dir=project / "build",
                 target="system-update-bundle",
+                definitions={"ESP_IRIS_PYTHON": str(iris_python)},
                 timeout=3600,
             )
         else:
