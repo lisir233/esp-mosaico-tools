@@ -32,10 +32,14 @@ config IRIS_FACTORY_SYSTEM_UPDATE_BACKEND
         manifest/component SHA-256, image validation and protected-partition
         policy still apply, but there is no release-key authentication.
 
-        The recovery, sysmeta, OTA data, PHY data, core-dump and application
-        NVS regions must retain their current offsets and sizes. ota_0 must
-        retain its start address; its size may change only when the same plan
-        supplies an application image that fits the target layout.
+        System-update v2 requires the current and target partition tables to
+        contain the exact otadata, phy_init, sysmeta, factory Recovery and
+        coredump contracts. Other partitions may change. Application and data
+        images are written through descriptors derived from the validated
+        target partition table before that table is committed last.
+
+        Legacy v1 manifests retain the original exact source-layout hash and
+        stricter target compatibility checks.
 
         This first product backend intentionally rejects flash-encrypted
         builds. System Inventory remains available without a writer.

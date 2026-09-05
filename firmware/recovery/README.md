@@ -38,8 +38,9 @@ python mosaico.py system-update --device-id DEVICE_ID \
 ```
 
 RPC 只启动后台任务并立即返回。Recovery 等待已配置的 Wi-Fi，下载并验证所有
-组件；application 写入 `ota_0`，bootloader 和 partition table 暂存在 PSRAM，
-所有组件验证完成后才进入不可取消的 single-copy commit。
+组件。v2 bundle 先暂存并验证目标 partition table，再按照目标表描述写入
+application 和 data；bootloader 同样暂存在 PSRAM，所有组件验证完成后才进入
+不可取消的 single-copy commit。
 
 HTTPS 默认使用 ESP-IDF certificate bundle 验证服务器。明文 HTTP 仅用于隔离的
 开发网络，需显式设置
@@ -83,8 +84,9 @@ python mosaico.py system-update --device-id DEVICE_ID \
 ```
 
 Recovery 逐块读取组件并复用与 USB、HTTP(S) 相同的 manifest、SHA-256、镜像及
-分区布局校验。application 流式写入 `ota_0`；bootloader 和 partition table 暂存
-到 PSRAM，全部验证完成后统一提交。三种来源共用一个 Flash writer owner，不能
+分区布局校验。v2 manifest 必须将 partition table 放在首个组件；Recovery 验证
+当前表和目标表中的五个不可变分区后，按照目标表流式写入 application 和 data。
+bootloader 暂存到 PSRAM，全部验证完成后统一提交。三种来源共用一个 Flash writer owner，不能
 并行执行。可通过 `CONFIG_IRIS_FACTORY_NAND_SYSTEM_UPDATE_AUTO_START=y` 配置固定
 路径自动启动；默认关闭，避免误用 NAND 中遗留的旧 bundle。启动 NAND 更新后不要
 再通过文件服务修改该 bundle；单文件上传是原子的，但一个 bundle 的多个文件不构成
@@ -106,8 +108,10 @@ Recovery 逐块读取组件并复用与 USB、HTTP(S) 相同的 manifest、SHA-2
 
 `sysmeta` 中的 `esp_iris`、`wifi`、`iris_ota_demo` 和 `update` namespace
 分别保存设备身份及 TCP pairing token、Factory Wi-Fi、Recovery OTA 状态和
-最后一次系统更新结果。除 `ota_0` 的尾部可按受控迁移策略回收外，其他分区的
-offset 和 size 均属于固定布局契约。
+最后一次系统更新结果。System Update v2 只要求 `otadata`、`phy_init`、
+`sysmeta`、`factory` 和 `coredump` 的名称、类型、子类型、offset、size 与 flags
+严格符合上表；`nvs`、`ota_0` 以及其他应用数据分区可由目标表调整。v1 manifest
+仍按完整 source layout SHA-256 和旧版目标布局规则校验。
 
 常用选项可通过 `python mosaico.py <command> --help` 查看。自动化环境可加
 `--json`；`recover` 在唯一识别到受支持设备后直接执行，无需二次确认。

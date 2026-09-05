@@ -334,7 +334,8 @@ static esp_err_t inspect_manifest_candidate(
     const cJSON *components = cJSON_GetObjectItemCaseSensitive(
         root, "components");
     if (!cJSON_IsString(schema) || schema->valuestring == NULL ||
-        strcmp(schema->valuestring, "esp-iris-system-update/v1") != 0 ||
+        (strcmp(schema->valuestring, "esp-iris-system-update/v1") != 0 &&
+         strcmp(schema->valuestring, "esp-iris-system-update/v2") != 0) ||
         !cJSON_IsArray(components)) {
         result = ESP_ERR_INVALID_ARG;
         goto done;
