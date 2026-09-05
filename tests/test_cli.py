@@ -1130,6 +1130,12 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(result["operation"]["status"], "succeeded")
         ota_argv = context.run.call_args.args[0]
         self.assertIn("--execution-mode", ota_argv)
+        compatibility = json.loads(ota_argv[ota_argv.index("--compatibility-json") + 1])
+        self.assertEqual(compatibility, {
+            "chip_target": "esp32s31", "product_contract": "esp-mosaico/v1",
+            "board_id": "esp-mosaico", "layout_id": "mosaico-retained-recovery-v1",
+            "recovery_abi": 1,
+        })
         self.assertNotIn("--validation-mode", ota_argv)
         poll.assert_called_once_with(context, session, "ota-status", "operation-1")
         messages = [call.args[0] for call in context.status.call_args_list]
@@ -1183,6 +1189,9 @@ class GatewayTests(unittest.TestCase):
         argv = context.run.call_args.args[0]
         self.assertIn("system-update", argv)
         self.assertIn("release.irisfw", argv)
+        compatibility = json.loads(argv[argv.index("--compatibility-json") + 1])
+        self.assertEqual(compatibility["product_contract"], "esp-mosaico/v1")
+        self.assertEqual(compatibility["recovery_abi"], 1)
         poll.assert_called_once_with(
             context, session, "ota-status", "system-operation-1"
         )

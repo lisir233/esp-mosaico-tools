@@ -33,6 +33,13 @@ REQUIRED_GATEWAY_API_MAJOR = 1
 MAINTENANCE_CAPABILITY = "device-maintenance-lease/v1"
 ENDPOINT_MAINTENANCE_CAPABILITY = "physical-endpoint-maintenance-lease/v1"
 SYSTEM_INVENTORY_CAPABILITY = "system-inventory/v1"
+MOSAICO_COMPATIBILITY_JSON = json.dumps({
+    "chip_target": "esp32s31",
+    "product_contract": "esp-mosaico/v1",
+    "board_id": "esp-mosaico",
+    "layout_id": "mosaico-retained-recovery-v1",
+    "recovery_abi": 1,
+}, separators=(",", ":"))
 
 
 def _state_home() -> Path:
@@ -824,6 +831,8 @@ def run_ota(
                 str(map_file),
                 "--execution-mode",
                 "recovery",
+                "--compatibility-json",
+                MOSAICO_COMPATIBILITY_JSON,
             ),
             timeout=timeout,
         )
@@ -857,7 +866,11 @@ def run_system_update_bundle(
     started = time.monotonic()
     try:
         result = context.run(
-            session.ctl_argv("system-update", device_id, str(bundle)),
+            session.ctl_argv(
+                "system-update", device_id, str(bundle),
+                "--compatibility-json",
+                MOSAICO_COMPATIBILITY_JSON,
+            ),
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as error:
