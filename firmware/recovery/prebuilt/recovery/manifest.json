@@ -50,7 +50,7 @@
     "secure_boot": false
   },
   "source": {
-    "commit": "5412f9687908e32edffe86ea2df2e0d0d8e45873",
+    "commit": "cfb7d20c6d39dc0cca041d03fad205af78ac54b5",
     "dirty": false
   },
   "target": "esp32s31",
