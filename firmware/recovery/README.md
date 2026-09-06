@@ -84,7 +84,7 @@ python mosaico.py system-update --device-id DEVICE_ID \
 ```
 
 Recovery 逐块读取组件并复用与 USB、HTTP(S) 相同的 manifest、SHA-256、镜像及
-分区布局校验。v2 manifest 必须将 partition table 放在首个组件；Recovery 验证
+分区布局校验。v1 manifest 必须将 partition table 放在首个组件；Recovery 验证
 当前表和目标表中的五个不可变分区后，按照目标表流式写入 application 和 data。
 bootloader 暂存到 PSRAM，全部验证完成后统一提交。三种来源共用一个 Flash writer owner，不能
 并行执行。可通过 `CONFIG_IRIS_FACTORY_NAND_SYSTEM_UPDATE_AUTO_START=y` 配置固定
@@ -108,10 +108,9 @@ bootloader 暂存到 PSRAM，全部验证完成后统一提交。三种来源共
 
 `sysmeta` 中的 `esp_iris`、`wifi`、`iris_ota_demo` 和 `update` namespace
 分别保存设备身份及 TCP pairing token、Factory Wi-Fi、Recovery OTA 状态和
-最后一次系统更新结果。System Update v2 只要求 `otadata`、`phy_init`、
+最后一次系统更新结果。System Update v1 只要求 `otadata`、`phy_init`、
 `sysmeta`、`factory` 和 `coredump` 的名称、类型、子类型、offset、size 与 flags
-严格符合上表；`nvs`、`ota_0` 以及其他应用数据分区可由目标表调整。v1 manifest
-仍按完整 source layout SHA-256 和旧版目标布局规则校验。
+严格符合上表；`nvs`、`ota_0` 以及其他应用数据分区可由目标表调整。
 
 常用选项可通过 `python mosaico.py <command> --help` 查看。自动化环境可加
 `--json`；`recover` 在唯一识别到受支持设备后直接执行，无需二次确认。

@@ -29,8 +29,7 @@
 #include "freertos/task.h"
 #include "psa/crypto.h"
 
-#define FACTORY_SYSTEM_SCHEMA_V1 "esp-iris-system-update/v1"
-#define FACTORY_SYSTEM_SCHEMA_V2 "esp-iris-system-update/v2"
+#define FACTORY_SYSTEM_SCHEMA "esp-iris-system-update/v1"
 #define FACTORY_SYSTEM_HASH_CHUNK_BYTES 1024U
 #define FACTORY_SYSTEM_RESTART_DELAY_MS 1800U
 #define FACTORY_SYSTEM_ESP32S31_CHIP_ID 0x20U
@@ -51,10 +50,8 @@ typedef struct {
     size_t plan_count;
     int active_index;
     uint32_t received;
-    bool layout_policy_v2;
     bool target_layout_valid;
     uint8_t operation_id[ESP_IRIS_SYSTEM_OPERATION_ID_BYTES];
-    uint8_t current_layout_sha256[ESP_IRIS_SYSTEM_SHA256_BYTES];
     uint8_t target_layout_sha256[ESP_IRIS_SYSTEM_SHA256_BYTES];
     uint8_t *bootloader_image;
     uint8_t *partition_table_image;
@@ -253,14 +250,11 @@ static void update_state_reset(void)
     s_update.plan_count = 0;
     s_update.active_index = -1;
     s_update.received = 0;
-    s_update.layout_policy_v2 = false;
     s_update.target_layout_valid = false;
     s_update.active_partition = NULL;
     s_update.application_received = false;
     memset(s_update.plan, 0, sizeof(s_update.plan));
     memset(s_update.operation_id, 0, sizeof(s_update.operation_id));
-    memset(s_update.current_layout_sha256, 0,
-           sizeof(s_update.current_layout_sha256));
     memset(s_update.target_layout_sha256, 0,
            sizeof(s_update.target_layout_sha256));
 }
@@ -311,30 +305,6 @@ static esp_err_t json_sha256(const cJSON *object, const char *name,
     return output_size == 32 ? ESP_OK : ESP_ERR_INVALID_SIZE;
 }
 
-static bool source_layout_authorized(const cJSON *root,
-                                     const uint8_t actual[32])
-{
-    const cJSON *sources = json_member(root, "source_layout_sha256");
-    if (!cJSON_IsArray(sources) || cJSON_GetArraySize(sources) == 0) {
-        return false;
-    }
-    const cJSON *item = NULL;
-    cJSON_ArrayForEach(item, sources) {
-        if (!cJSON_IsString(item) || item->valuestring == NULL) {
-            return false;
-        }
-        uint8_t expected[32];
-        size_t expected_size = 0;
-        if (decode_hex(item->valuestring, expected, sizeof(expected),
-                       &expected_size) == ESP_OK &&
-            expected_size == sizeof(expected) &&
-            bytes_equal(expected, actual, sizeof(expected))) {
-            return true;
-        }
-    }
-    return false;
-}
-
 static esp_err_t component_kind(const char *name,
                                 esp_iris_system_update_component_kind_t *kind)
 {
@@ -350,24 +320,6 @@ static esp_err_t component_kind(const char *name,
         return ESP_ERR_NOT_SUPPORTED;
     }
     return ESP_OK;
-}
-
-static const esp_partition_t *find_update_data_partition(
-    const esp_iris_system_update_component_t *component)
-{
-    static const char *const allowed_labels[] = {"ui_apps", "system"};
-    for (size_t i = 0; i < sizeof(allowed_labels) / sizeof(allowed_labels[0]);
-         ++i) {
-        const esp_partition_t *partition = esp_partition_find_first(
-            ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY,
-            allowed_labels[i]);
-        if (partition != NULL &&
-            component->target_offset == partition->address &&
-            component->size <= partition->size) {
-            return partition;
-        }
-    }
-    return NULL;
 }
 
 static bool parse_version_triplet(const char *text, uint32_t version[3])
@@ -417,8 +369,7 @@ static bool recovery_version_satisfies(const char *minimum)
 }
 
 static esp_err_t authorize_component_target(
-    const esp_iris_system_update_component_t *component,
-    bool layout_policy_v2)
+    const esp_iris_system_update_component_t *component)
 {
     if (component->kind == ESP_IRIS_SYSTEM_UPDATE_COMPONENT_BOOTLOADER) {
         return component->target_offset == CONFIG_BOOTLOADER_OFFSET_IN_FLASH &&
@@ -435,29 +386,12 @@ static esp_err_t authorize_component_target(
             : ESP_ERR_INVALID_SIZE;
     }
     if (component->kind == ESP_IRIS_SYSTEM_UPDATE_COMPONENT_APPLICATION) {
-        if (layout_policy_v2) {
-            return component->target_offset %
-                           FACTORY_SYSTEM_FLASH_SECTOR_BYTES == 0
-                ? ESP_OK
-                : ESP_ERR_INVALID_SIZE;
-        }
-        const esp_partition_t *partition = esp_partition_find_first(
-            ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, "ota_0");
-        if (partition == NULL ||
-            component->target_offset != partition->address ||
-            component->size > partition->size) {
-            return ESP_ERR_INVALID_SIZE;
-        }
-        return ESP_OK;
+        return component->target_offset % FACTORY_SYSTEM_FLASH_SECTOR_BYTES == 0
+            ? ESP_OK
+            : ESP_ERR_INVALID_SIZE;
     }
     if (component->kind == ESP_IRIS_SYSTEM_UPDATE_COMPONENT_DATA) {
-        if (layout_policy_v2) {
-            return component->target_offset %
-                           FACTORY_SYSTEM_FLASH_SECTOR_BYTES == 0
-                ? ESP_OK
-                : ESP_ERR_INVALID_SIZE;
-        }
-        return find_update_data_partition(component) != NULL
+        return component->target_offset % FACTORY_SYSTEM_FLASH_SECTOR_BYTES == 0
             ? ESP_OK
             : ESP_ERR_INVALID_SIZE;
     }
@@ -465,8 +399,7 @@ static esp_err_t authorize_component_target(
 }
 
 static esp_err_t parse_component(const cJSON *item,
-                                 factory_update_plan_component_t *plan,
-                                 bool layout_policy_v2)
+                                 factory_update_plan_component_t *plan)
 {
     uint32_t id = 0;
     uint32_t flags = 0;
@@ -513,7 +446,7 @@ static esp_err_t parse_component(const cJSON *item,
             strchr(filename, '/') == NULL && strchr(filename, '\\') == NULL,
         ESP_ERR_INVALID_ARG, TAG, "component file is not root-level");
     strlcpy(plan->filename, filename, sizeof(plan->filename));
-    return authorize_component_target(&plan->descriptor, layout_policy_v2);
+    return authorize_component_target(&plan->descriptor);
 }
 
 static esp_err_t parse_manifest_json(
@@ -544,8 +477,8 @@ static esp_err_t parse_manifest_json(
         json_member(root, "minimum_recovery_version");
 
     if (json_string(root, "schema", &schema) != ESP_OK ||
-        (strcmp(schema, FACTORY_SYSTEM_SCHEMA_V1) != 0 &&
-         strcmp(schema, FACTORY_SYSTEM_SCHEMA_V2) != 0) ||
+        strcmp(schema, FACTORY_SYSTEM_SCHEMA) != 0 ||
+        json_member(root, "source_layout_sha256") != NULL ||
         json_member(root, "signature") != NULL ||
         json_uint32(target, "chip_id", UINT16_MAX, &chip_id) != ESP_OK ||
         chip_id != FACTORY_SYSTEM_ESP32S31_CHIP_ID ||
@@ -559,29 +492,11 @@ static esp_err_t parse_manifest_json(
         err = ESP_ERR_INVALID_ARG;
         goto done;
     }
-    s_update.layout_policy_v2 =
-        strcmp(schema, FACTORY_SYSTEM_SCHEMA_V2) == 0;
-    if (s_update.layout_policy_v2 &&
-        json_member(root, "source_layout_sha256") != NULL) {
-        err = ESP_ERR_INVALID_ARG;
-        goto done;
-    }
     if (minimum_recovery != NULL &&
         (!cJSON_IsString(minimum_recovery) ||
          !recovery_version_satisfies(minimum_recovery->valuestring))) {
         err = ESP_ERR_INVALID_VERSION;
         goto done;
-    }
-    if (!s_update.layout_policy_v2) {
-        err = hash_flash_region(CONFIG_PARTITION_TABLE_OFFSET,
-                                FACTORY_SYSTEM_FLASH_SECTOR_BYTES,
-                                s_update.current_layout_sha256);
-        if (err != ESP_OK ||
-            !source_layout_authorized(root,
-                                      s_update.current_layout_sha256)) {
-            err = err == ESP_OK ? ESP_ERR_INVALID_VERSION : err;
-            goto done;
-        }
     }
     err = json_sha256(root, "target_layout_sha256",
                       s_update.target_layout_sha256);
@@ -594,7 +509,7 @@ static esp_err_t parse_manifest_json(
     cJSON_ArrayForEach(component, components) {
         factory_update_plan_component_t *plan =
             &s_update.plan[s_update.plan_count];
-        err = parse_component(component, plan, s_update.layout_policy_v2);
+        err = parse_component(component, plan);
         if (err != ESP_OK ||
             (plan->descriptor.kind != ESP_IRIS_SYSTEM_UPDATE_COMPONENT_DATA &&
              seen_kinds[plan->descriptor.kind])) {
@@ -620,27 +535,20 @@ static esp_err_t parse_manifest_json(
         seen_kinds[plan->descriptor.kind] = true;
         ++s_update.plan_count;
     }
-    if (s_update.layout_policy_v2 &&
-        (!seen_kinds[ESP_IRIS_SYSTEM_UPDATE_COMPONENT_PARTITION_TABLE] ||
-         s_update.plan[0].descriptor.kind !=
-             ESP_IRIS_SYSTEM_UPDATE_COMPONENT_PARTITION_TABLE)) {
+    if (!seen_kinds[ESP_IRIS_SYSTEM_UPDATE_COMPONENT_PARTITION_TABLE] ||
+        s_update.plan[0].descriptor.kind !=
+            ESP_IRIS_SYSTEM_UPDATE_COMPONENT_PARTITION_TABLE) {
         err = ESP_ERR_INVALID_ARG;
         goto done;
     }
-    if (seen_kinds[ESP_IRIS_SYSTEM_UPDATE_COMPONENT_PARTITION_TABLE]) {
-        for (size_t i = 0; i < s_update.plan_count; ++i) {
-            if (s_update.plan[i].descriptor.kind ==
-                    ESP_IRIS_SYSTEM_UPDATE_COMPONENT_PARTITION_TABLE &&
-                !bytes_equal(s_update.plan[i].descriptor.sha256,
-                             s_update.target_layout_sha256, 32)) {
-                err = ESP_ERR_INVALID_CRC;
-                goto done;
-            }
+    for (size_t i = 0; i < s_update.plan_count; ++i) {
+        if (s_update.plan[i].descriptor.kind ==
+                ESP_IRIS_SYSTEM_UPDATE_COMPONENT_PARTITION_TABLE &&
+            !bytes_equal(s_update.plan[i].descriptor.sha256,
+                         s_update.target_layout_sha256, 32)) {
+            err = ESP_ERR_INVALID_CRC;
+            goto done;
         }
-    } else if (!bytes_equal(s_update.current_layout_sha256,
-                            s_update.target_layout_sha256, 32)) {
-        err = ESP_ERR_INVALID_VERSION;
-        goto done;
     }
 
 done:
@@ -719,20 +627,9 @@ static esp_err_t begin_component(
     factory_update_plan_component_t *plan = &s_update.plan[index];
 
     if (component->kind == ESP_IRIS_SYSTEM_UPDATE_COMPONENT_APPLICATION) {
-        if (!s_update.layout_policy_v2) {
-            const esp_partition_t *partition = esp_partition_find_first(
-                ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0,
-                "ota_0");
-            ESP_RETURN_ON_FALSE(partition != NULL, ESP_ERR_NOT_FOUND, TAG,
-                                "ota_0 missing");
-            plan->target_partition = *partition;
-            plan->target_partition_valid = true;
-        }
         ESP_RETURN_ON_FALSE(
-            plan->target_partition_valid &&
-                (!s_update.layout_policy_v2 ||
-                 s_update.target_layout_valid),
-                            ESP_ERR_NOT_FOUND, TAG, "ota_0 missing");
+            plan->target_partition_valid && s_update.target_layout_valid,
+            ESP_ERR_NOT_FOUND, TAG, "ota_0 missing");
         s_update.active_partition = &plan->target_partition;
         const size_t erase_size =
             (component->size + FACTORY_SYSTEM_FLASH_SECTOR_BYTES - 1U) &
@@ -747,18 +644,8 @@ static esp_err_t begin_component(
             TAG, "erase ota_0");
         ESP_LOGI(TAG, "ota_0 erase complete");
     } else if (component->kind == ESP_IRIS_SYSTEM_UPDATE_COMPONENT_DATA) {
-        if (!s_update.layout_policy_v2) {
-            const esp_partition_t *partition =
-                find_update_data_partition(component);
-            ESP_RETURN_ON_FALSE(partition != NULL, ESP_ERR_NOT_FOUND, TAG,
-                                "data partition target missing");
-            plan->target_partition = *partition;
-            plan->target_partition_valid = true;
-        }
         ESP_RETURN_ON_FALSE(
-            plan->target_partition_valid &&
-                (!s_update.layout_policy_v2 ||
-                 s_update.target_layout_valid),
+            plan->target_partition_valid && s_update.target_layout_valid,
             ESP_ERR_NOT_FOUND, TAG, "data partition target missing");
         s_update.active_partition = &plan->target_partition;
         ESP_LOGI(TAG,
@@ -902,94 +789,6 @@ static const esp_partition_info_t *find_partition_entry(
     return NULL;
 }
 
-static bool partition_entry_matches(const esp_partition_info_t *entries,
-                                    int count,
-                                    const esp_partition_t *required)
-{
-    const esp_partition_info_t *entry = find_partition_entry(
-        entries, count, required->type, required->subtype, required->label);
-    return entry != NULL && entry->pos.offset == required->address &&
-           entry->pos.size == required->size;
-}
-
-static esp_err_t require_preserved_partition(
-    const esp_partition_info_t *entries, int count, esp_partition_type_t type,
-    esp_partition_subtype_t subtype, const char *label)
-{
-    const esp_partition_t *required =
-        esp_partition_find_first(type, subtype, label);
-    return required != NULL && partition_entry_matches(entries, count, required)
-        ? ESP_OK
-        : ESP_ERR_INVALID_VERSION;
-}
-
-static esp_err_t require_compatible_ota_partition(
-    const esp_partition_info_t *entries, int count)
-{
-    const esp_partition_t *current = esp_partition_find_first(
-        ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, "ota_0");
-    const esp_partition_info_t *target = find_partition_entry(
-        entries, count, ESP_PARTITION_TYPE_APP,
-        ESP_PARTITION_SUBTYPE_APP_OTA_0, "ota_0");
-    if (current == NULL || target == NULL ||
-        target->pos.offset != current->address) {
-        return ESP_ERR_INVALID_VERSION;
-    }
-
-    const factory_update_plan_component_t *application = NULL;
-    for (size_t i = 0; i < s_update.plan_count; ++i) {
-        if (s_update.plan[i].descriptor.kind ==
-            ESP_IRIS_SYSTEM_UPDATE_COMPONENT_APPLICATION) {
-            application = &s_update.plan[i];
-            break;
-        }
-    }
-    if (target->pos.size != current->size && application == NULL) {
-        return ESP_ERR_INVALID_VERSION;
-    }
-    if (application != NULL &&
-        application->descriptor.size > target->pos.size) {
-        return ESP_ERR_INVALID_SIZE;
-    }
-    return ESP_OK;
-}
-
-static esp_err_t validate_partition_table(const uint8_t *image)
-{
-    int count = 0;
-    const esp_partition_info_t *entries =
-        (const esp_partition_info_t *)image;
-    ESP_RETURN_ON_ERROR(esp_partition_table_verify(entries, true, &count), TAG,
-                        "invalid target partition table");
-    ESP_RETURN_ON_ERROR(require_preserved_partition(
-                            entries, count, ESP_PARTITION_TYPE_APP,
-                            ESP_PARTITION_SUBTYPE_APP_FACTORY, "factory"),
-                        TAG, "factory partition must be preserved");
-    ESP_RETURN_ON_ERROR(require_compatible_ota_partition(entries, count), TAG,
-                        "ota_0 offset or target size is incompatible");
-    ESP_RETURN_ON_ERROR(require_preserved_partition(
-                            entries, count, ESP_PARTITION_TYPE_DATA,
-                            ESP_PARTITION_SUBTYPE_DATA_OTA, "otadata"),
-                        TAG, "OTA data partition must be preserved");
-    ESP_RETURN_ON_ERROR(require_preserved_partition(
-                            entries, count, ESP_PARTITION_TYPE_DATA,
-                            ESP_PARTITION_SUBTYPE_DATA_PHY, "phy_init"),
-                        TAG, "PHY data partition must be preserved");
-    ESP_RETURN_ON_ERROR(require_preserved_partition(
-                            entries, count, ESP_PARTITION_TYPE_DATA,
-                            ESP_PARTITION_SUBTYPE_DATA_NVS, "sysmeta"),
-                        TAG, "system metadata partition must be preserved");
-    ESP_RETURN_ON_ERROR(require_preserved_partition(
-                            entries, count, ESP_PARTITION_TYPE_DATA,
-                            ESP_PARTITION_SUBTYPE_DATA_COREDUMP, "coredump"),
-                        TAG, "core-dump partition must be preserved");
-    ESP_RETURN_ON_ERROR(require_preserved_partition(
-                            entries, count, ESP_PARTITION_TYPE_DATA,
-                            ESP_PARTITION_SUBTYPE_DATA_NVS, "nvs"),
-                        TAG, "application NVS partition must be preserved");
-    return ESP_OK;
-}
-
 typedef struct {
     esp_partition_type_t type;
     esp_partition_subtype_t subtype;
@@ -1086,7 +885,7 @@ static void partition_descriptor_from_entry(
     partition->readonly = (entry->flags & PART_FLAG_READONLY) != 0;
 }
 
-static esp_err_t resolve_v2_component_targets(
+static esp_err_t resolve_component_targets(
     const esp_partition_info_t *entries, int count)
 {
     for (size_t i = 0; i < s_update.plan_count; ++i) {
@@ -1135,7 +934,7 @@ static esp_err_t resolve_v2_component_targets(
     return ESP_OK;
 }
 
-static esp_err_t validate_partition_table_v2(const uint8_t *image)
+static esp_err_t validate_partition_table(const uint8_t *image)
 {
     int target_count = 0;
     const esp_partition_info_t *target_entries =
@@ -1168,8 +967,8 @@ static esp_err_t validate_partition_table_v2(const uint8_t *image)
     free(current_image);
     ESP_RETURN_ON_ERROR(ret, TAG,
                         "current immutable partition contract");
-    ESP_RETURN_ON_ERROR(resolve_v2_component_targets(target_entries,
-                                                     target_count),
+    ESP_RETURN_ON_ERROR(resolve_component_targets(target_entries,
+                                                  target_count),
                         TAG, "target component mapping");
     s_update.target_layout_valid = true;
     return ESP_OK;
@@ -1237,16 +1036,9 @@ static esp_err_t end_component(
                           "bootloader validation");
     } else if (component->kind ==
                ESP_IRIS_SYSTEM_UPDATE_COMPONENT_PARTITION_TABLE) {
-        if (s_update.layout_policy_v2) {
-            ESP_GOTO_ON_ERROR(
-                validate_partition_table_v2(
-                    s_update.partition_table_image),
-                done, TAG, "immutable partition policy");
-        } else {
-            ESP_GOTO_ON_ERROR(
-                validate_partition_table(s_update.partition_table_image),
-                done, TAG, "partition policy");
-        }
+        ESP_GOTO_ON_ERROR(
+            validate_partition_table(s_update.partition_table_image), done,
+            TAG, "immutable partition policy");
     } else {
         ret = ESP_ERR_NOT_SUPPORTED;
         goto done;

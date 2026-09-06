@@ -1,5 +1,5 @@
 {
-  "schema": "esp-iris-system-update/v2",
+  "schema": "esp-iris-system-update/v1",
   "release": "1.0.0",
   "minimum_recovery_version": "2.4.0-recovery",
   "target": {
