@@ -805,9 +805,9 @@ static const immutable_partition_contract_t s_immutable_partitions[] = {
     {ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_NVS, "sysmeta",
      0xc000, 0x14000},
     {ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, "factory",
-     0x20000, 0x200000},
+     0x20000, 0x1c0000},
     {ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_COREDUMP, "coredump",
-     0x220000, 0xd0000},
+     0x1e0000, 0x20000},
 };
 
 static bool partition_entry_matches_contract(

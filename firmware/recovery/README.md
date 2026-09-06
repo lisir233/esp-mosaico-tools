@@ -101,10 +101,13 @@ bootloader 暂存到 PSRAM，全部验证完成后统一提交。三种来源共
 | `otadata` | `0x9000` | 8 KiB | ESP-IDF OTA 选择与回滚状态 |
 | `phy_init` | `0xb000` | 4 KiB | PHY 初始化数据 |
 | `sysmeta` | `0xc000` | 80 KiB | 系统专用 NVS |
-| `factory` | `0x20000` | 2 MiB | 保留 Recovery |
-| `coredump` | `0x220000` | 832 KiB | 崩溃证据 |
-| `nvs` | `0x2f0000` | 64 KiB | 应用 NVS |
-| `ota_0` | `0x300000` | 13 MiB | 普通应用；后续布局可从尾部缩减 |
+| `factory` | `0x20000` | 1.75 MiB | 保留 Recovery |
+| `coredump` | `0x1e0000` | 128 KiB | 崩溃证据预留空间 |
+| `nvs` | `0x200000` | 64 KiB | 应用 NVS |
+| `ota_0` | `0x210000` | 13.94 MiB | 普通应用；后续布局可从尾部缩减 |
+
+固定系统前缀从 Flash 起始到 `coredump` 结束恰好为 2 MiB，
+`nvs` 和普通应用从 `0x200000` 之后开始。
 
 `sysmeta` 中的 `esp_iris`、`wifi`、`iris_ota_demo` 和 `update` namespace
 分别保存设备身份及 TCP pairing token、Factory Wi-Fi、Recovery OTA 状态和
