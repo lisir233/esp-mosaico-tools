@@ -1133,7 +1133,7 @@ class GatewayTests(unittest.TestCase):
         compatibility = json.loads(ota_argv[ota_argv.index("--compatibility-json") + 1])
         self.assertEqual(compatibility, {
             "chip_target": "esp32s31", "product_contract": "esp-mosaico/v1",
-            "board_id": "esp-mosaico", "layout_id": "mosaico-retained-recovery-v1",
+            "board_id": "esp-mosaico", "layout_id": "mosaico-retained-recovery-2m-v1",
             "recovery_abi": 1,
         })
         self.assertNotIn("--validation-mode", ota_argv)

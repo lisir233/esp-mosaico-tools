@@ -37,7 +37,7 @@ MOSAICO_COMPATIBILITY_JSON = json.dumps({
     "chip_target": "esp32s31",
     "product_contract": "esp-mosaico/v1",
     "board_id": "esp-mosaico",
-    "layout_id": "mosaico-retained-recovery-v1",
+    "layout_id": "mosaico-retained-recovery-2m-v1",
     "recovery_abi": 1,
 }, separators=(",", ":"))
 
