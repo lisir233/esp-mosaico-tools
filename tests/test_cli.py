@@ -107,7 +107,6 @@ def workspace_for(root: Path, *, default_project: Path | None = None) -> Workspa
         config_path=root / ".mosaico.json",
         projects_dir=root / "projects",
         default_project=default_project,
-        environment_file=root / "Environment",
         run_dir=root / ".codex-runs" / "mosaico",
         bsp_path=root / "submodule" / "esp-mosaico-bsp",
         esp_iris_path=root / "submodule" / "esp-iris",

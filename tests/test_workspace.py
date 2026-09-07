@@ -20,7 +20,6 @@ def configuration() -> dict[str, object]:
         "workspace": {
             "projects_dir": "apps",
             "default_project": "apps/demo",
-            "environment_file": "Environment",
             "run_dir": ".runs",
         },
         "dependencies": {

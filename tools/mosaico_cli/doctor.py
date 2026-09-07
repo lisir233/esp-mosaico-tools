@@ -95,12 +95,6 @@ def diagnose_host(workspace: WorkspaceConfig) -> dict[str, Any]:
     except OSError as error:
         _check(checks, "state", "fail", f"State directory is not writable: {error}")
 
-    inventory = workspace.environment_file
-    if not inventory.is_file() or inventory.stat().st_size == 0:
-        _check(checks, "inventory", "warn", "Environment inventory is absent or empty")
-    else:
-        _check(checks, "inventory", "pass", "Environment inventory is present")
-
     idf: dict[str, Any] = {
         "constraint": _declared_constraint(workspace),
         "python_version": "unresolved",

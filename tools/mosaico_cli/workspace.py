@@ -24,7 +24,6 @@ class WorkspaceConfig:
     config_path: Path
     projects_dir: Path
     default_project: Path | None
-    environment_file: Path
     run_dir: Path
     bsp_path: Path
     esp_iris_path: Path
@@ -156,10 +155,6 @@ def load_workspace(
         config_path=config_path,
         projects_dir=workspace_path(workspace.get("projects_dir"), "workspace.projects_dir"),
         default_project=default_project,
-        environment_file=workspace_path(
-            workspace.get("environment_file", "Environment"),
-            "workspace.environment_file",
-        ),
         run_dir=workspace_path(
             workspace.get("run_dir", ".codex-runs/mosaico"),
             "workspace.run_dir",
