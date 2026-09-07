@@ -15,6 +15,7 @@
 
 #include "esp_iris_system_update.h"
 #include "esp_wifi.h"
+#include "factory_http_update_authorization.h"
 #include "factory_nand_update.h"
 #include "factory_network.h"
 #include "factory_system_update.h"
@@ -68,6 +69,7 @@ typedef enum {
     FACTORY_PAGE_READY = 0,
     FACTORY_PAGE_WIFI,
     FACTORY_PAGE_PAIRING,
+    FACTORY_PAGE_HTTP_UPDATE_AUTH,
     FACTORY_PAGE_PASSWORD,
     FACTORY_PAGE_NAND_LIST,
     FACTORY_PAGE_NAND_CONFIRM,
@@ -81,6 +83,7 @@ typedef struct {
     lv_obj_t *ready_screen;
     lv_obj_t *wifi_screen;
     lv_obj_t *pairing_screen;
+    lv_obj_t *http_update_auth_screen;
     lv_obj_t *password_screen;
     lv_obj_t *update_screen;
     lv_obj_t *result_screen;
@@ -95,6 +98,10 @@ typedef struct {
     lv_obj_t *wifi_scan_status;
     lv_obj_t *pairing_endpoint;
     lv_obj_t *pairing_token;
+    lv_obj_t *http_update_endpoint;
+    lv_obj_t *http_update_code;
+    lv_obj_t *http_update_code_detail;
+    lv_obj_t *http_update_generate;
     lv_obj_t *password_title;
     lv_obj_t *password_input;
     lv_obj_t *password_toggle;
@@ -153,6 +160,19 @@ static void show_page(factory_page_t page);
 static void page_event(lv_event_t *event)
 {
     show_page((factory_page_t)(intptr_t)lv_event_get_user_data(event));
+}
+
+static void http_update_generate_event(lv_event_t *event)
+{
+    (void)event;
+    (void)factory_http_update_code_generate();
+}
+
+static void http_update_cancel_event(lv_event_t *event)
+{
+    (void)event;
+    factory_http_update_code_cancel();
+    show_page(FACTORY_PAGE_READY);
 }
 
 static void scan_event(lv_event_t *event)
@@ -344,16 +364,21 @@ static void ready_screen_create(void)
     lv_obj_align(nand, LV_ALIGN_TOP_MID, 0, 380);
     lv_obj_add_event_cb(nand, nand_open_event, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t *settings = button_create(s_ui.ready_screen, "Wi-Fi", 174, 36,
+    lv_obj_t *settings = button_create(s_ui.ready_screen, "Wi-Fi", 112, 36,
                                        false);
     lv_obj_align(settings, LV_ALIGN_TOP_LEFT, 60, 428);
     lv_obj_add_event_cb(settings, page_event, LV_EVENT_CLICKED,
                         (void *)(intptr_t)FACTORY_PAGE_WIFI);
-    lv_obj_t *pairing = button_create(s_ui.ready_screen, "TCP pairing", 174,
+    lv_obj_t *pairing = button_create(s_ui.ready_screen, "TCP pairing", 112,
                                       36, false);
-    lv_obj_align(pairing, LV_ALIGN_TOP_RIGHT, -60, 428);
+    lv_obj_align(pairing, LV_ALIGN_TOP_LEFT, 184, 428);
     lv_obj_add_event_cb(pairing, page_event, LV_EVENT_CLICKED,
                         (void *)(intptr_t)FACTORY_PAGE_PAIRING);
+    lv_obj_t *http_update = button_create(s_ui.ready_screen, "HTTP update", 112,
+                                          36, false);
+    lv_obj_align(http_update, LV_ALIGN_TOP_LEFT, 308, 428);
+    lv_obj_add_event_cb(http_update, page_event, LV_EVENT_CLICKED,
+                        (void *)(intptr_t)FACTORY_PAGE_HTTP_UPDATE_AUTH);
 }
 
 static void pairing_screen_create(void)
@@ -428,6 +453,135 @@ static void pairing_screen_update(void)
     } else {
         lv_label_set_text(s_ui.pairing_token, "Pairing token unavailable");
     }
+}
+
+static void http_update_auth_screen_create(void)
+{
+    s_ui.http_update_auth_screen = lv_obj_create(NULL);
+    screen_prepare(s_ui.http_update_auth_screen);
+    header_create(s_ui.http_update_auth_screen, "RECOVERY", "HTTP Update",
+                  true);
+
+    lv_obj_t *endpoint_card = box_create(s_ui.http_update_auth_screen, 368, 76,
+                                         COLOR_TEXT, 18);
+    lv_obj_align(endpoint_card, LV_ALIGN_TOP_MID, 0, 88);
+    lv_obj_t *endpoint_title = label_create(endpoint_card, "UPDATE ENDPOINT",
+                                            &lv_font_montserrat_12,
+                                            COLOR_ORANGE);
+    lv_obj_align(endpoint_title, LV_ALIGN_TOP_LEFT, 18, 13);
+    s_ui.http_update_endpoint = label_create(
+        endpoint_card, "Connect Wi-Fi first", &lv_font_montserrat_14,
+        COLOR_PAPER);
+    lv_obj_set_width(s_ui.http_update_endpoint, 332);
+    lv_obj_set_style_text_align(s_ui.http_update_endpoint,
+                                LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_align(s_ui.http_update_endpoint, LV_ALIGN_BOTTOM_MID, 0, -15);
+
+    lv_obj_t *code_title = label_create(s_ui.http_update_auth_screen,
+                                        "ONE-TIME UPDATE CODE",
+                                        &lv_font_montserrat_12, COLOR_MUTED);
+    lv_obj_align(code_title, LV_ALIGN_TOP_MID, 0, 183);
+    lv_obj_t *code_card = box_create(s_ui.http_update_auth_screen, 368, 106,
+                                     COLOR_SURFACE, 16);
+    lv_obj_set_style_border_width(code_card, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_color(code_card, COLOR_LINE, LV_PART_MAIN);
+    lv_obj_align(code_card, LV_ALIGN_TOP_MID, 0, 207);
+    s_ui.http_update_code = label_create(code_card, "------",
+                                         &lv_font_montserrat_32, COLOR_TEXT);
+    lv_obj_set_style_text_letter_space(s_ui.http_update_code, 7, LV_PART_MAIN);
+    lv_obj_align(s_ui.http_update_code, LV_ALIGN_TOP_MID, 0, 17);
+    s_ui.http_update_code_detail = label_create(
+        code_card, "Generating code", &lv_font_montserrat_12, COLOR_MUTED);
+    lv_obj_set_width(s_ui.http_update_code_detail, 330);
+    lv_obj_set_style_text_align(s_ui.http_update_code_detail,
+                                LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_align(s_ui.http_update_code_detail, LV_ALIGN_BOTTOM_MID, 0, -15);
+
+    lv_obj_t *warning = label_create(
+        s_ui.http_update_auth_screen,
+        "This code allows one unsigned system update.\nUse only on a trusted local network.",
+        &lv_font_montserrat_12, COLOR_MUTED);
+    lv_obj_set_width(warning, 368);
+    lv_obj_set_style_text_align(warning, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_align(warning, LV_ALIGN_TOP_MID, 0, 329);
+
+    s_ui.http_update_generate = button_create(
+        s_ui.http_update_auth_screen, "Generate new", 174, 42, true);
+    lv_obj_align(s_ui.http_update_generate, LV_ALIGN_TOP_LEFT, 60, 397);
+    lv_obj_add_event_cb(s_ui.http_update_generate, http_update_generate_event,
+                        LV_EVENT_CLICKED, NULL);
+    lv_obj_t *cancel = button_create(s_ui.http_update_auth_screen, "Cancel",
+                                     174, 42, false);
+    lv_obj_align(cancel, LV_ALIGN_TOP_RIGHT, -60, 397);
+    lv_obj_add_event_cb(cancel, http_update_cancel_event, LV_EVENT_CLICKED,
+                        NULL);
+}
+
+static void http_update_auth_screen_update(
+    const factory_network_snapshot_t *network)
+{
+    if (network != NULL && network->state == FACTORY_NETWORK_CONNECTED) {
+        lv_label_set_text_fmt(s_ui.http_update_endpoint, "%s.local - %s:%u",
+                              network->hostname, network->ip,
+                              CONFIG_IRIS_FACTORY_HTTP_TRIGGER_SERVER_PORT);
+    } else {
+        lv_label_set_text(s_ui.http_update_endpoint, "Connect Wi-Fi first");
+    }
+
+    factory_http_update_code_snapshot_t snapshot;
+    if (factory_http_update_code_get_snapshot(&snapshot) != ESP_OK) {
+        return;
+    }
+    bool can_generate = true;
+    switch (snapshot.state) {
+    case FACTORY_HTTP_UPDATE_CODE_AVAILABLE:
+        lv_label_set_text(s_ui.http_update_code, snapshot.code);
+        lv_label_set_text_fmt(
+            s_ui.http_update_code_detail, "%lus remaining - %u attempt%s",
+            (unsigned long)((snapshot.remaining_ms + 999U) / 1000U),
+            snapshot.remaining_attempts,
+            snapshot.remaining_attempts == 1U ? "" : "s");
+        break;
+    case FACTORY_HTTP_UPDATE_CODE_EXPIRED:
+        lv_label_set_text(s_ui.http_update_code, "EXPIRED");
+        lv_label_set_text(s_ui.http_update_code_detail,
+                          "Generate a new code on this screen");
+        break;
+    case FACTORY_HTTP_UPDATE_CODE_LOCKED:
+        lv_label_set_text(s_ui.http_update_code, "LOCKED");
+        lv_label_set_text(s_ui.http_update_code_detail,
+                          "Too many attempts - generate a new code");
+        break;
+    case FACTORY_HTTP_UPDATE_CODE_CONSUMED:
+        can_generate = false;
+        lv_label_set_text(s_ui.http_update_code, "USED");
+        lv_label_set_text(s_ui.http_update_code_detail,
+                          "Code consumed - admitting update");
+        break;
+    case FACTORY_HTTP_UPDATE_CODE_UPDATE_RUNNING:
+        can_generate = false;
+        lv_label_set_text(s_ui.http_update_code, "USED");
+        lv_label_set_text(s_ui.http_update_code_detail,
+                          "System update is running");
+        break;
+    case FACTORY_HTTP_UPDATE_CODE_START_FAILED:
+        lv_label_set_text(s_ui.http_update_code, "FAILED");
+        lv_label_set_text(s_ui.http_update_code_detail,
+                          "Old code remains consumed - generate a new code");
+        break;
+    case FACTORY_HTTP_UPDATE_CODE_DISABLED:
+    default:
+        lv_label_set_text(s_ui.http_update_code, "------");
+        lv_label_set_text(s_ui.http_update_code_detail,
+                          "Generate a code on this screen");
+        break;
+    }
+    if (can_generate) {
+        lv_obj_clear_state(s_ui.http_update_generate, LV_STATE_DISABLED);
+    } else {
+        lv_obj_add_state(s_ui.http_update_generate, LV_STATE_DISABLED);
+    }
+    memset(snapshot.code, 0, sizeof(snapshot.code));
 }
 
 static void wifi_screen_create(void)
@@ -775,6 +929,15 @@ static void result_screen_create(void)
 
 static void show_page(factory_page_t page)
 {
+    const factory_page_t previous = s_ui.page;
+    if (previous == FACTORY_PAGE_HTTP_UPDATE_AUTH &&
+        page != FACTORY_PAGE_HTTP_UPDATE_AUTH) {
+        factory_http_update_code_cancel();
+    }
+    if (page == FACTORY_PAGE_HTTP_UPDATE_AUTH &&
+        previous != FACTORY_PAGE_HTTP_UPDATE_AUTH) {
+        (void)factory_http_update_code_generate();
+    }
     s_ui.page = page;
     lv_obj_t *screen = s_ui.ready_screen;
     if (page == FACTORY_PAGE_WIFI) {
@@ -783,6 +946,14 @@ static void show_page(factory_page_t page)
     } else if (page == FACTORY_PAGE_PAIRING) {
         screen = s_ui.pairing_screen;
         pairing_screen_update();
+    } else if (page == FACTORY_PAGE_HTTP_UPDATE_AUTH) {
+        screen = s_ui.http_update_auth_screen;
+        factory_network_snapshot_t network = {0};
+        if (factory_network_get_snapshot(&network) == ESP_OK) {
+            http_update_auth_screen_update(&network);
+        } else {
+            http_update_auth_screen_update(NULL);
+        }
     } else if (page == FACTORY_PAGE_PASSWORD) {
         screen = s_ui.password_screen;
     } else if (page == FACTORY_PAGE_NAND_LIST) {
@@ -1163,6 +1334,9 @@ static void ui_status_task(void *arg)
             if (have_network) {
                 network_ui_update(&network);
             }
+            if (s_ui.page == FACTORY_PAGE_HTTP_UPDATE_AUTH) {
+                http_update_auth_screen_update(have_network ? &network : NULL);
+            }
             const bool nand_preparing = nand_ui_update();
             if (!nand_preparing && !ota_ui_update(&iris)) {
                 system_update_ui_update(&iris);
@@ -1183,6 +1357,7 @@ esp_err_t factory_ui_start(void)
     ready_screen_create();
     wifi_screen_create();
     pairing_screen_create();
+    http_update_auth_screen_create();
     password_screen_create();
     nand_list_screen_create();
     nand_confirm_screen_create();
@@ -1196,4 +1371,23 @@ esp_err_t factory_ui_start(void)
                         ESP_ERR_NO_MEM, TAG, "start UI status task");
     ESP_LOGI(TAG, "factory UI started at %dx%d", BSP_LCD_H_RES, BSP_LCD_V_RES);
     return ESP_OK;
+}
+
+esp_err_t factory_ui_open_http_update(void)
+{
+    if (s_ui.display == NULL || s_ui.http_update_auth_screen == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    ESP_RETURN_ON_FALSE(bsp_display_lock(1000), ESP_ERR_TIMEOUT, TAG,
+                        "lock display for HTTP Update page");
+    esp_err_t err = ESP_OK;
+    if (s_ui.page == FACTORY_PAGE_HTTP_UPDATE_AUTH) {
+        err = factory_http_update_code_generate();
+    }
+    if (err == ESP_OK) {
+        show_page(FACTORY_PAGE_HTTP_UPDATE_AUTH);
+    }
+    bsp_display_unlock();
+    ESP_RETURN_ON_ERROR(err, TAG, "generate a fresh HTTP Update code");
+    return err;
 }

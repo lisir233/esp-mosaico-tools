@@ -118,6 +118,20 @@ static void update_status_start(
     taskEXIT_CRITICAL(&s_state_lock);
 }
 
+static void update_status_reserve(
+    factory_system_update_owner_t owner,
+    const uint8_t operation_id[ESP_IRIS_SYSTEM_OPERATION_ID_BYTES])
+{
+    taskENTER_CRITICAL(&s_state_lock);
+    memset(&s_status, 0, sizeof(s_status));
+    s_status.owner = owner;
+    memcpy(s_status.update.operation_id, operation_id,
+           sizeof(s_status.update.operation_id));
+    s_status.update.phase = ESP_IRIS_SYSTEM_UPDATE_PHASE_IDLE;
+    s_status.update.result = ESP_OK;
+    taskEXIT_CRITICAL(&s_state_lock);
+}
+
 static void update_status_component(uint8_t component_id, uint32_t received,
                                     uint32_t size,
                                     esp_iris_system_update_phase_t phase)
@@ -158,6 +172,19 @@ static bool bytes_equal(const uint8_t *left, const uint8_t *right,
         difference |= left[i] ^ right[i];
     }
     return difference == 0;
+}
+
+static bool operation_id_valid(
+    const uint8_t operation_id[ESP_IRIS_SYSTEM_OPERATION_ID_BYTES])
+{
+    if (operation_id == NULL) {
+        return false;
+    }
+    uint8_t nonzero = 0;
+    for (size_t i = 0; i < ESP_IRIS_SYSTEM_OPERATION_ID_BYTES; ++i) {
+        nonzero |= operation_id[i];
+    }
+    return nonzero != 0;
 }
 
 static esp_err_t decode_hex(const char *hex, uint8_t *output,
@@ -561,13 +588,29 @@ static esp_err_t prepare_update_owned(
     const esp_iris_system_update_manifest_t *manifest,
     factory_system_update_owner_t owner)
 {
-    ESP_RETURN_ON_FALSE(update_owner_claim(owner), ESP_ERR_INVALID_STATE, TAG,
-                        "system update writer is busy");
-    update_state_reset();
     if (manifest == NULL || manifest->manifest == NULL ||
-        manifest->manifest_size == 0 || manifest->signature_size != 0) {
+        manifest->manifest_size == 0 ||
+        !operation_id_valid(manifest->operation_id)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const bool reserved = update_owner_is(owner);
+    if (reserved) {
+        ESP_RETURN_ON_FALSE(
+            !s_update.prepared &&
+                bytes_equal(manifest->operation_id, s_update.operation_id,
+                            ESP_IRIS_SYSTEM_OPERATION_ID_BYTES),
+            ESP_ERR_INVALID_STATE, TAG,
+            "system update reservation does not match");
+    } else {
+        ESP_RETURN_ON_FALSE(update_owner_claim(owner), ESP_ERR_INVALID_STATE,
+                            TAG, "system update writer is busy");
+        update_state_reset();
+    }
+    if (manifest->signature_size != 0) {
         update_status_finish(ESP_IRIS_SYSTEM_UPDATE_PHASE_FAILED,
                              ESP_ERR_INVALID_ARG);
+        update_state_reset();
         update_owner_release();
         return ESP_ERR_INVALID_ARG;
     }
@@ -1219,7 +1262,7 @@ static void abort_update_owned(
         ESP_LOGW(TAG, "ignored abort from non-owner %d", (int)owner);
         return;
     }
-    if (operation_id == NULL || !s_update.prepared ||
+    if (operation_id == NULL ||
         !bytes_equal(operation_id, s_update.operation_id,
                      ESP_IRIS_SYSTEM_OPERATION_ID_BYTES)) {
         ESP_LOGW(TAG, "ignored abort for inactive operation");
@@ -1260,6 +1303,24 @@ esp_err_t factory_system_update_get_status(
     return ESP_OK;
 }
 
+esp_err_t factory_system_update_source_reserve(
+    factory_system_update_owner_t owner,
+    const uint8_t operation_id[ESP_IRIS_SYSTEM_OPERATION_ID_BYTES])
+{
+    ESP_RETURN_ON_FALSE(
+        (owner == FACTORY_SYSTEM_UPDATE_OWNER_HTTP ||
+         owner == FACTORY_SYSTEM_UPDATE_OWNER_NAND) &&
+            operation_id_valid(operation_id),
+        ESP_ERR_INVALID_ARG, TAG, "invalid system-update reservation");
+    ESP_RETURN_ON_FALSE(update_owner_claim(owner), ESP_ERR_INVALID_STATE, TAG,
+                        "system update writer is busy");
+    update_state_reset();
+    memcpy(s_update.operation_id, operation_id,
+           sizeof(s_update.operation_id));
+    update_status_reserve(owner, operation_id);
+    return ESP_OK;
+}
+
 esp_err_t factory_system_update_source_prepare(
     factory_system_update_owner_t owner,
     const uint8_t *manifest, size_t manifest_size,
@@ -1271,11 +1332,8 @@ esp_err_t factory_system_update_source_prepare(
             operation_id != NULL,
         ESP_ERR_INVALID_ARG, TAG, "invalid local update manifest");
 
-    bool nonzero_operation_id = false;
-    for (size_t i = 0; i < ESP_IRIS_SYSTEM_OPERATION_ID_BYTES; ++i) {
-        nonzero_operation_id |= operation_id[i] != 0;
-    }
-    ESP_RETURN_ON_FALSE(nonzero_operation_id, ESP_ERR_INVALID_ARG, TAG,
+    ESP_RETURN_ON_FALSE(operation_id_valid(operation_id), ESP_ERR_INVALID_ARG,
+                        TAG,
                         "local operation ID is zero");
 
     cJSON *root = cJSON_ParseWithLength((const char *)manifest,
@@ -1420,6 +1478,15 @@ esp_err_t factory_system_update_get_status(
     memset(status, 0, sizeof(*status));
     status->update.phase = ESP_IRIS_SYSTEM_UPDATE_PHASE_IDLE;
     return ESP_OK;
+}
+
+esp_err_t factory_system_update_source_reserve(
+    factory_system_update_owner_t owner,
+    const uint8_t operation_id[ESP_IRIS_SYSTEM_OPERATION_ID_BYTES])
+{
+    (void)owner;
+    (void)operation_id;
+    return ESP_ERR_NOT_SUPPORTED;
 }
 
 esp_err_t factory_system_update_source_prepare(

@@ -26,6 +26,21 @@ typedef struct {
     esp_iris_system_update_status_t update;
 } factory_system_update_status_t;
 
+typedef enum {
+    FACTORY_HTTP_UPDATE_IDLE = 0,
+    FACTORY_HTTP_UPDATE_WAITING_NETWORK,
+    FACTORY_HTTP_UPDATE_FETCHING_MANIFEST,
+    FACTORY_HTTP_UPDATE_APPLYING,
+    FACTORY_HTTP_UPDATE_COMMITTED,
+    FACTORY_HTTP_UPDATE_FAILED,
+} factory_http_update_state_t;
+
+typedef struct {
+    factory_http_update_state_t state;
+    esp_err_t result;
+    uint8_t operation_id[ESP_IRIS_SYSTEM_OPERATION_ID_BYTES];
+} factory_http_update_snapshot_t;
+
 /* Register the recovery-only, product-owned Flash-policy backend.
  * When the backend is disabled, this remains a successful no-op and the
  * read-only System Inventory service is still available. */
@@ -36,12 +51,24 @@ esp_err_t factory_system_update_register(void);
  * using its bounded root-level `file` member. Only one local or ESP-Iris
  * system-update transaction may own the Flash writer at a time. */
 esp_err_t factory_system_update_start_http(const char *manifest_url);
+esp_err_t factory_system_update_start_http_with_id(
+    const char *manifest_url,
+    uint8_t operation_id[ESP_IRIS_SYSTEM_OPERATION_ID_BYTES]);
+esp_err_t factory_http_update_get_snapshot(
+    factory_http_update_snapshot_t *snapshot);
 esp_err_t factory_system_update_http_register(void);
 esp_err_t factory_system_update_start_nand(const char *manifest_path);
 esp_err_t factory_system_update_nand_register(void);
 
 esp_err_t factory_system_update_get_status(
     factory_system_update_status_t *status);
+
+/* Reserve the shared writer before an asynchronous source performs network
+ * or filesystem work. This makes admission atomic across HTTP, NAND and
+ * ESP-Iris, so callers can report a busy writer before accepting a job. */
+esp_err_t factory_system_update_source_reserve(
+    factory_system_update_owner_t owner,
+    const uint8_t operation_id[ESP_IRIS_SYSTEM_OPERATION_ID_BYTES]);
 
 /* Source-neutral transaction API used by the HTTP and NAND adapters. It
  * deliberately remains product-private: target addresses are authorized by

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import base64
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from dataclasses import replace
 import hashlib
@@ -36,10 +37,13 @@ from mosaico_cli.commands import (
     _device_status,
     _MonitorTextRenderer,
     _recovery_verification_status,
+    configure_recovery_network,
+    enter_recovery,
     install,
     list_devices,
     monitor,
     recover,
+    read_http_update_code,
     start_system_update,
 )
 from mosaico_cli.errors import (
@@ -173,6 +177,22 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(value.source, "reviewed")
         self.assertEqual(value.timeout, 180)
         self.assertFalse(value.dry_run)
+
+    def test_enter_recovery_defaults(self) -> None:
+        value = self.parse("enter-recovery", "--device-id", "device-a")
+        self.assertEqual(value.device_id, "device-a")
+        self.assertEqual(value.timeout, 30)
+
+    def test_recovery_wifi_has_no_password_argument(self) -> None:
+        value = self.parse("recovery-wifi", "--ssid", "lab-network")
+        self.assertEqual(value.ssid, "lab-network")
+        self.assertFalse(hasattr(value, "password"))
+        self.assertEqual(value.timeout, 30)
+
+    def test_http_update_code_uses_only_device_selection(self) -> None:
+        value = self.parse("http-update-code", "--device-id", "device-a")
+        self.assertEqual(value.device_id, "device-a")
+        self.assertFalse(hasattr(value, "code"))
 
     def test_monitor_defaults(self) -> None:
         value = self.parse("monitor")
@@ -458,6 +478,166 @@ class RegistryAndSelectionTests(unittest.TestCase):
 
 
 class GatewayTests(unittest.TestCase):
+    def test_enter_recovery_transitions_same_device_without_installing(self) -> None:
+        context = mock.Mock(log_path=Path("run.log"))
+        session = GatewaySession(Path("python"), Path("iris"), (), None, False)
+        arguments = argparse.Namespace(
+            gateway_profile=None,
+            device_id="device-a",
+            timeout=20,
+        )
+        with ExitStack() as contexts:
+            contexts.enter_context(
+                mock.patch("mosaico_cli.commands.ensure_gateway", return_value=session)
+            )
+            contexts.enter_context(
+                mock.patch(
+                    "mosaico_cli.commands.connected_devices",
+                    return_value=[
+                        {
+                            "device_id": "device-a",
+                            "firmware_mode": "normal",
+                            "boot_id": 9007199254740993,
+                            "boot_id_text": "9007199254740993",
+                        }
+                    ],
+                )
+            )
+            contexts.enter_context(
+                mock.patch(
+                    "mosaico_cli.commands.gateway_json",
+                    return_value={
+                        "device_id": "device-a",
+                        "firmware_mode": "normal",
+                        "boot_id": 9007199254740993,
+                        "boot_id_text": "9007199254740993",
+                    },
+                )
+            )
+            transition = contexts.enter_context(
+                mock.patch(
+                    "mosaico_cli.commands.enter_recovery_and_wait",
+                    return_value={
+                        "device_id": "device-a",
+                        "firmware_mode": "recovery",
+                        "boot_id": 9007199254740995,
+                        "boot_id_text": "9007199254740995",
+                        "app_version": "2.6.0-recovery",
+                    },
+                )
+            )
+            result = enter_recovery(arguments, context)
+
+        self.assertEqual(result["transition"], "entered_recovery")
+        self.assertEqual(result["device_id"], "device-a")
+        self.assertEqual(result["boot_id_before"], 9007199254740993)
+        self.assertEqual(result["boot_id_before_text"], "9007199254740993")
+        self.assertEqual(result["boot_id"], 9007199254740995)
+        self.assertEqual(result["boot_id_text"], "9007199254740995")
+        transition.assert_called_once_with(
+            context,
+            session,
+            "device-a",
+            previous_boot_id=9007199254740993,
+            timeout=20,
+        )
+
+    def test_recovery_wifi_uses_hidden_password_and_stdin_payload(self) -> None:
+        context = mock.Mock(log_path=Path("run.log"))
+        session = GatewaySession(Path("python"), Path("iris"), (), None, False)
+        arguments = argparse.Namespace(
+            gateway_profile=None,
+            device_id="device-a",
+            ssid="lab-network",
+            timeout=5,
+        )
+        connected = {
+            "payload_base64": base64.b64encode(
+                b'{"state":4,"connected":true,"ip":"192.0.2.2",'
+                b'"hostname":"mosaico-test","error":0}'
+            ).decode("ascii")
+        }
+        with ExitStack() as contexts:
+            contexts.enter_context(
+                mock.patch("mosaico_cli.commands.ensure_gateway", return_value=session)
+            )
+            contexts.enter_context(
+                mock.patch(
+                    "mosaico_cli.commands.connected_devices",
+                    return_value=[
+                        {"device_id": "device-a", "firmware_mode": "recovery"}
+                    ],
+                )
+            )
+            gateway = contexts.enter_context(
+                mock.patch(
+                    "mosaico_cli.commands.gateway_json",
+                    side_effect=[
+                        {"device": {"firmware_mode": "recovery"}},
+                        {"payload_base64": ""},
+                        connected,
+                    ],
+                )
+            )
+            contexts.enter_context(
+                mock.patch("mosaico_cli.commands.getpass.getpass", return_value="secret123")
+            )
+            result = configure_recovery_network(arguments, context)
+
+        self.assertEqual(result["network"]["ip"], "192.0.2.2")
+        request = gateway.call_args_list[1]
+        self.assertIn("--payload-base64-stdin", request.args)
+        self.assertTrue(request.kwargs["sensitive_output"])
+        self.assertNotIn("secret123", repr(request))
+        payload = base64.b64decode(request.kwargs["stdin_text"])
+        self.assertEqual(payload[0], len(b"lab-network"))
+        self.assertEqual(payload[1], len(b"secret123"))
+        self.assertEqual(payload[2:], b"lab-networksecret123")
+
+    def test_http_update_code_is_read_from_usb_control_response(self) -> None:
+        context = mock.Mock(log_path=Path("run.log"))
+        session = GatewaySession(Path("python"), Path("iris"), (), None, False)
+        arguments = argparse.Namespace(gateway_profile=None, device_id="device-a")
+        authorization = {
+            "payload_base64": base64.b64encode(
+                b'{"code":"038271","expires_in_ms":60000,'
+                b'"remaining_attempts":3}'
+            ).decode("ascii")
+        }
+        network = {
+            "payload_base64": base64.b64encode(
+                b'{"state":4,"connected":true,"ip":"192.0.2.2",'
+                b'"hostname":"mosaico-test","error":0}'
+            ).decode("ascii")
+        }
+        with ExitStack() as contexts:
+            contexts.enter_context(
+                mock.patch("mosaico_cli.commands.ensure_gateway", return_value=session)
+            )
+            contexts.enter_context(
+                mock.patch(
+                    "mosaico_cli.commands.connected_devices",
+                    return_value=[
+                        {"device_id": "device-a", "firmware_mode": "recovery"}
+                    ],
+                )
+            )
+            contexts.enter_context(
+                mock.patch(
+                    "mosaico_cli.commands.gateway_json",
+                    side_effect=[
+                        {"device": {"firmware_mode": "recovery"}},
+                        network,
+                        authorization,
+                    ],
+                )
+            )
+            result = read_http_update_code(arguments, context)
+
+        self.assertEqual(result["authorization"]["code"], "038271")
+        self.assertEqual(result["base_url"], "http://192.0.2.2:8080")
+        self.assertNotIn("038271", " ".join(call.args[0] for call in context.status.call_args_list))
+
     def test_general_gateway_compatibility_does_not_require_inventory(self) -> None:
         health = {
             "gateway_api": {"major": 1, "minor": 1},

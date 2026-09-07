@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import getpass
 import json
 import os
 from pathlib import Path
@@ -57,6 +59,11 @@ _IDF_MONITOR_COLORS = {
 }
 _ANSI_NORMAL = "\033[0m"
 
+_RECOVERY_CONTROL_SERVICE_ID = "0x1202"
+_RECOVERY_WIFI_CONNECT_METHOD = "1"
+_RECOVERY_NETWORK_STATUS_METHOD = "2"
+_RECOVERY_HTTP_CODE_METHOD = "3"
+
 
 def _device_status(value: Any) -> dict[str, Any]:
     """Normalize Gateway status responses without bypassing host verification."""
@@ -64,6 +71,155 @@ def _device_status(value: Any) -> dict[str, Any]:
         return {}
     status = value.get("device", value)
     return status if isinstance(status, dict) else {}
+
+
+def _raw_rpc_payload(value: Any) -> bytes:
+    encoded = value.get("payload_base64") if isinstance(value, dict) else None
+    if not isinstance(encoded, str):
+        raise DeviceError("ESP-Iris returned an invalid Recovery control response.")
+    try:
+        return base64.b64decode(encoded, validate=True)
+    except ValueError as error:
+        raise DeviceError("ESP-Iris returned malformed Recovery control data.") from error
+
+
+def _recovery_control_device(arguments: Any, context: RunContext) -> tuple[Any, str]:
+    session = ensure_gateway(context, getattr(arguments, "gateway_profile", None))
+    device = select_device(
+        connected_devices(context, session), getattr(arguments, "device_id", None)
+    )
+    device_id = str(device.get("device_id"))
+    status = _device_status(gateway_json(context, session, "status", device_id))
+    if (status.get("firmware_mode") or device.get("firmware_mode")) != "recovery":
+        raise RecoveryRequiredError(
+            "Recovery control requires a live Recovery service. "
+            "Run 'python mosaico.py recover' first."
+        )
+    return session, device_id
+
+
+def configure_recovery_network(arguments: Any, context: RunContext) -> dict[str, Any]:
+    session, device_id = _recovery_control_device(arguments, context)
+    ssid = arguments.ssid.encode("utf-8")
+    password_text = getpass.getpass("Wi-Fi password: ")
+    password = password_text.encode("utf-8")
+    password_text = ""
+    if not 0 < len(ssid) < 33:
+        raise DeviceError("Wi-Fi SSID must be between 1 and 32 UTF-8 bytes.")
+    password_valid = len(password) == 0 or 8 <= len(password) <= 63
+    if len(password) == 64:
+        password_valid = re.fullmatch(rb"[0-9a-fA-F]{64}", password) is not None
+    if not password_valid:
+        raise DeviceError("Wi-Fi password must be empty, 8-63 bytes, or 64 hex bytes.")
+    payload = bytes((len(ssid), len(password))) + ssid + password
+    context.status("recovery: submitting Wi-Fi credentials over the active USB session")
+    gateway_json(
+        context,
+        session,
+        "rpc-raw",
+        device_id,
+        _RECOVERY_CONTROL_SERVICE_ID,
+        _RECOVERY_WIFI_CONNECT_METHOD,
+        "--payload-base64-stdin",
+        "--deadline-ms",
+        "5000",
+        stdin_text=base64.b64encode(payload).decode("ascii"),
+        timeout=10,
+        sensitive_output=True,
+    )
+    password = b""
+    payload = b""
+
+    deadline = time.monotonic() + arguments.timeout
+    latest: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        value = gateway_json(
+            context,
+            session,
+            "rpc-raw",
+            device_id,
+            _RECOVERY_CONTROL_SERVICE_ID,
+            _RECOVERY_NETWORK_STATUS_METHOD,
+            "--deadline-ms",
+            "2000",
+            timeout=5,
+            sensitive_output=True,
+        )
+        try:
+            latest_value = json.loads(_raw_rpc_payload(value).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise DeviceError("Recovery returned invalid network status JSON.") from error
+        latest = latest_value if isinstance(latest_value, dict) else {}
+        if latest.get("connected") is True:
+            context.status("recovery: Wi-Fi connected")
+            return {
+                "command": "recovery-wifi",
+                "status": "succeeded",
+                "device_id": device_id,
+                "network": latest,
+                "gateway_started": session.started_local,
+                "log": str(context.log_path),
+            }
+        time.sleep(0.5)
+    raise OperationError(
+        "Recovery did not connect to Wi-Fi before the timeout.",
+        details={"device_id": device_id, "network": latest},
+    )
+
+
+def read_http_update_code(arguments: Any, context: RunContext) -> dict[str, Any]:
+    session, device_id = _recovery_control_device(arguments, context)
+    network_value = gateway_json(
+        context,
+        session,
+        "rpc-raw",
+        device_id,
+        _RECOVERY_CONTROL_SERVICE_ID,
+        _RECOVERY_NETWORK_STATUS_METHOD,
+        "--deadline-ms",
+        "2000",
+        timeout=5,
+        sensitive_output=True,
+    )
+    try:
+        network = json.loads(_raw_rpc_payload(network_value).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise DeviceError("Recovery returned invalid network status JSON.") from error
+    if not isinstance(network, dict) or network.get("connected") is not True:
+        raise DeviceError(
+            "Recovery must be connected to Wi-Fi before opening HTTP Update."
+        )
+    context.status("recovery: opening the physical HTTP Update screen over USB")
+    value = gateway_json(
+        context,
+        session,
+        "rpc-raw",
+        device_id,
+        _RECOVERY_CONTROL_SERVICE_ID,
+        _RECOVERY_HTTP_CODE_METHOD,
+        "--deadline-ms",
+        "5000",
+        timeout=10,
+        sensitive_output=True,
+    )
+    try:
+        code_value = json.loads(_raw_rpc_payload(value).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise DeviceError("Recovery returned invalid HTTP Update code JSON.") from error
+    if not isinstance(code_value, dict) or re.fullmatch(
+        r"[0-9]{6}", str(code_value.get("code", ""))
+    ) is None:
+        raise DeviceError("Recovery returned an invalid HTTP Update code.")
+    return {
+        "command": "http-update-code",
+        "status": "succeeded",
+        "device_id": device_id,
+        "authorization": code_value,
+        "network": network,
+        "base_url": f"http://{network.get('ip')}:{code_value.get('http_port', 8080)}",
+        "gateway_started": session.started_local,
+        "log": str(context.log_path),
+    }
 
 
 def _recovery_verification_status(
@@ -172,6 +328,58 @@ def list_devices(context: RunContext, gateway_profile: str | None) -> dict[str, 
         "gateway_started": session.started_local,
         "gateway_profile": session.profile,
         "devices": devices,
+    }
+
+
+def enter_recovery(arguments: Any, context: RunContext) -> dict[str, Any]:
+    """Enter retained Recovery without starting an installation."""
+
+    session = ensure_gateway(context, arguments.gateway_profile)
+    device = select_device(connected_devices(context, session), arguments.device_id)
+    device_id = str(device.get("device_id"))
+    status = _device_status(gateway_json(context, session, "status", device_id))
+    mode = status.get("firmware_mode") or device.get("firmware_mode")
+    before_boot_id = status.get("boot_id") or device.get("boot_id")
+    before_boot_id_text = (
+        status.get("boot_id_text")
+        or device.get("boot_id_text")
+        or (str(before_boot_id) if before_boot_id is not None else None)
+    )
+    if mode == "recovery":
+        recovery = status
+        transition = "already_recovery"
+    else:
+        if mode != "normal":
+            raise DeviceError(
+                "The device firmware mode is unknown; refusing the Recovery transition."
+            )
+        context.status("recovery: entering retained Recovery")
+        recovery = enter_recovery_and_wait(
+            context,
+            session,
+            device_id,
+            previous_boot_id=before_boot_id,
+            timeout=arguments.timeout,
+        )
+        transition = "entered_recovery"
+    return {
+        "command": "enter-recovery",
+        "status": "succeeded",
+        "transition": transition,
+        "device_id": device_id,
+        "boot_id_before": before_boot_id,
+        "boot_id_before_text": before_boot_id_text,
+        "boot_id": recovery.get("boot_id"),
+        "boot_id_text": recovery.get("boot_id_text")
+        or (
+            str(recovery.get("boot_id"))
+            if recovery.get("boot_id") is not None
+            else None
+        ),
+        "firmware_mode": recovery.get("firmware_mode"),
+        "app_version": recovery.get("app_version"),
+        "gateway_started": session.started_local,
+        "log": str(context.log_path),
     }
 
 

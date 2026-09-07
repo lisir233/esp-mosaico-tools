@@ -17,6 +17,7 @@
 #include "esp_iris.h"
 #include "esp_log.h"
 #include "esp_random.h"
+#include "factory_http_update_authorization.h"
 #include "factory_network.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -28,12 +29,44 @@
 
 typedef struct {
     char manifest_url[FACTORY_SYSTEM_UPDATE_URL_BYTES];
+    uint8_t operation_id[ESP_IRIS_SYSTEM_OPERATION_ID_BYTES];
 } http_update_task_context_t;
 
 static const char *TAG = "factory_http_update";
 static TaskHandle_t s_http_task;
 static bool s_http_busy;
+static factory_http_update_snapshot_t s_http_snapshot = {
+    .state = FACTORY_HTTP_UPDATE_IDLE,
+    .result = ESP_OK,
+};
 static portMUX_TYPE s_http_task_lock = portMUX_INITIALIZER_UNLOCKED;
+
+static void http_source_status(
+    factory_http_update_state_t state, esp_err_t result,
+    const uint8_t operation_id[ESP_IRIS_SYSTEM_OPERATION_ID_BYTES])
+{
+    taskENTER_CRITICAL(&s_http_task_lock);
+    s_http_snapshot.state = state;
+    s_http_snapshot.result = result;
+    if (operation_id != NULL) {
+        memcpy(s_http_snapshot.operation_id, operation_id,
+               sizeof(s_http_snapshot.operation_id));
+    }
+    taskEXIT_CRITICAL(&s_http_task_lock);
+}
+
+static void generate_operation_id(
+    uint8_t operation_id[ESP_IRIS_SYSTEM_OPERATION_ID_BYTES])
+{
+    esp_fill_random(operation_id, ESP_IRIS_SYSTEM_OPERATION_ID_BYTES);
+    bool nonzero = false;
+    for (size_t i = 0; i < ESP_IRIS_SYSTEM_OPERATION_ID_BYTES; ++i) {
+        nonzero |= operation_id[i] != 0;
+    }
+    if (!nonzero) {
+        operation_id[ESP_IRIS_SYSTEM_OPERATION_ID_BYTES - 1U] = 1;
+    }
+}
 
 static bool url_is_https(const char *url)
 {
@@ -296,14 +329,14 @@ static esp_err_t wait_for_network(void)
 static void http_update_task(void *argument)
 {
     http_update_task_context_t *context = argument;
-    uint8_t operation_id[ESP_IRIS_SYSTEM_OPERATION_ID_BYTES];
-    esp_fill_random(operation_id, sizeof(operation_id));
     bool prepared = false;
     uint8_t *manifest = NULL;
     size_t manifest_size = 0;
 
     esp_err_t err = wait_for_network();
     if (err == ESP_OK) {
+        http_source_status(FACTORY_HTTP_UPDATE_FETCHING_MANIFEST, ESP_OK,
+                           context->operation_id);
         ESP_LOGI(TAG, "downloading system-update manifest");
         err = download_manifest(context->manifest_url, &manifest,
                                 &manifest_size);
@@ -311,8 +344,12 @@ static void http_update_task(void *argument)
     if (err == ESP_OK) {
         err = factory_system_update_source_prepare(
             FACTORY_SYSTEM_UPDATE_OWNER_HTTP, manifest, manifest_size,
-            operation_id);
+            context->operation_id);
         prepared = err == ESP_OK;
+        if (prepared) {
+            http_source_status(FACTORY_HTTP_UPDATE_APPLYING, ESP_OK,
+                               context->operation_id);
+        }
     }
     free(manifest);
 
@@ -337,14 +374,18 @@ static void http_update_task(void *argument)
     }
     if (err == ESP_OK) {
         err = factory_system_update_source_commit(
-            FACTORY_SYSTEM_UPDATE_OWNER_HTTP, operation_id);
+            FACTORY_SYSTEM_UPDATE_OWNER_HTTP, context->operation_id);
     }
     if (err != ESP_OK) {
-        if (prepared) {
-            factory_system_update_source_abort(
-                FACTORY_SYSTEM_UPDATE_OWNER_HTTP, operation_id, err);
-        }
+        factory_system_update_source_abort(
+            FACTORY_SYSTEM_UPDATE_OWNER_HTTP, context->operation_id, err);
+        http_source_status(FACTORY_HTTP_UPDATE_FAILED, err,
+                           context->operation_id);
         ESP_LOGE(TAG, "HTTP system update failed: %s", esp_err_to_name(err));
+        factory_http_update_code_mark_update_failed();
+    } else {
+        http_source_status(FACTORY_HTTP_UPDATE_COMMITTED, ESP_OK,
+                           context->operation_id);
     }
 
     free(context);
@@ -356,6 +397,13 @@ static void http_update_task(void *argument)
 }
 
 esp_err_t factory_system_update_start_http(const char *manifest_url)
+{
+    return factory_system_update_start_http_with_id(manifest_url, NULL);
+}
+
+esp_err_t factory_system_update_start_http_with_id(
+    const char *manifest_url,
+    uint8_t operation_id[ESP_IRIS_SYSTEM_OPERATION_ID_BYTES])
 {
     ESP_RETURN_ON_FALSE(manifest_url != NULL && url_is_allowed(manifest_url),
                         ESP_ERR_INVALID_ARG, TAG,
@@ -372,6 +420,7 @@ esp_err_t factory_system_update_start_http(const char *manifest_url)
                         "allocate HTTP update task");
     strlcpy(context->manifest_url, manifest_url,
             sizeof(context->manifest_url));
+    generate_operation_id(context->operation_id);
 
     taskENTER_CRITICAL(&s_http_task_lock);
     const bool busy = s_http_busy;
@@ -383,6 +432,21 @@ esp_err_t factory_system_update_start_http(const char *manifest_url)
         free(context);
         return ESP_ERR_INVALID_STATE;
     }
+    const esp_err_t reserve_err = factory_system_update_source_reserve(
+        FACTORY_SYSTEM_UPDATE_OWNER_HTTP, context->operation_id);
+    if (reserve_err != ESP_OK) {
+        taskENTER_CRITICAL(&s_http_task_lock);
+        s_http_busy = false;
+        taskEXIT_CRITICAL(&s_http_task_lock);
+        free(context);
+        return reserve_err;
+    }
+    http_source_status(FACTORY_HTTP_UPDATE_WAITING_NETWORK, ESP_OK,
+                       context->operation_id);
+    if (operation_id != NULL) {
+        memcpy(operation_id, context->operation_id,
+               ESP_IRIS_SYSTEM_OPERATION_ID_BYTES);
+    }
     if (xTaskCreate(http_update_task, "http_sysupdate",
                     CONFIG_IRIS_FACTORY_HTTP_SYSTEM_UPDATE_TASK_STACK,
                     context, 4, &s_http_task) != pdPASS) {
@@ -390,9 +454,25 @@ esp_err_t factory_system_update_start_http(const char *manifest_url)
         s_http_busy = false;
         s_http_task = NULL;
         taskEXIT_CRITICAL(&s_http_task_lock);
+        factory_system_update_source_abort(
+            FACTORY_SYSTEM_UPDATE_OWNER_HTTP, context->operation_id,
+            ESP_ERR_NO_MEM);
+        http_source_status(FACTORY_HTTP_UPDATE_FAILED, ESP_ERR_NO_MEM,
+                           context->operation_id);
         free(context);
         return ESP_ERR_NO_MEM;
     }
+    return ESP_OK;
+}
+
+esp_err_t factory_http_update_get_snapshot(
+    factory_http_update_snapshot_t *snapshot)
+{
+    ESP_RETURN_ON_FALSE(snapshot != NULL, ESP_ERR_INVALID_ARG, TAG,
+                        "HTTP update snapshot is null");
+    taskENTER_CRITICAL(&s_http_task_lock);
+    *snapshot = s_http_snapshot;
+    taskEXIT_CRITICAL(&s_http_task_lock);
     return ESP_OK;
 }
 
@@ -435,6 +515,27 @@ esp_err_t factory_system_update_start_http(const char *manifest_url)
 {
     (void)manifest_url;
     return ESP_ERR_NOT_SUPPORTED;
+}
+
+esp_err_t factory_system_update_start_http_with_id(
+    const char *manifest_url,
+    uint8_t operation_id[ESP_IRIS_SYSTEM_OPERATION_ID_BYTES])
+{
+    (void)manifest_url;
+    (void)operation_id;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+esp_err_t factory_http_update_get_snapshot(
+    factory_http_update_snapshot_t *snapshot)
+{
+    if (snapshot == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memset(snapshot, 0, sizeof(*snapshot));
+    snapshot->state = FACTORY_HTTP_UPDATE_IDLE;
+    snapshot->result = ESP_ERR_NOT_SUPPORTED;
+    return ESP_OK;
 }
 
 esp_err_t factory_system_update_http_register(void)

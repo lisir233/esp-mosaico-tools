@@ -47,6 +47,7 @@
 
 typedef struct {
     char manifest_path[FACTORY_SYSTEM_UPDATE_PATH_BYTES];
+    uint8_t operation_id[ESP_IRIS_SYSTEM_OPERATION_ID_BYTES];
 } nand_update_task_context_t;
 
 typedef struct {
@@ -644,8 +645,6 @@ static void generate_operation_id(
 static void nand_update_task(void *argument)
 {
     nand_update_task_context_t *context = argument;
-    uint8_t operation_id[ESP_IRIS_SYSTEM_OPERATION_ID_BYTES];
-    generate_operation_id(operation_id);
     bool prepared = false;
     uint8_t *manifest = NULL;
     size_t manifest_size = 0;
@@ -658,7 +657,7 @@ static void nand_update_task(void *argument)
     if (err == ESP_OK) {
         err = factory_system_update_source_prepare(
             FACTORY_SYSTEM_UPDATE_OWNER_NAND, manifest, manifest_size,
-            operation_id);
+            context->operation_id);
         prepared = err == ESP_OK;
         if (prepared) {
             update_source_status(FACTORY_NAND_UPDATE_RUNNING, ESP_OK);
@@ -688,13 +687,11 @@ static void nand_update_task(void *argument)
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "all NAND components verified; starting commit");
         err = factory_system_update_source_commit(
-            FACTORY_SYSTEM_UPDATE_OWNER_NAND, operation_id);
+            FACTORY_SYSTEM_UPDATE_OWNER_NAND, context->operation_id);
     }
     if (err != ESP_OK) {
-        if (prepared) {
-            factory_system_update_source_abort(
-                FACTORY_SYSTEM_UPDATE_OWNER_NAND, operation_id, err);
-        }
+        factory_system_update_source_abort(
+            FACTORY_SYSTEM_UPDATE_OWNER_NAND, context->operation_id, err);
         update_source_status(FACTORY_NAND_UPDATE_FAILED, err);
         ESP_LOGE(TAG, "NAND system update failed: %s", esp_err_to_name(err));
     }
@@ -714,16 +711,27 @@ esp_err_t factory_system_update_start_nand(const char *manifest_path)
                         "allocate NAND update task");
     strlcpy(context->manifest_path, manifest_path,
             sizeof(context->manifest_path));
+    generate_operation_id(context->operation_id);
 
     if (!nand_operation_claim()) {
         free(context);
         return ESP_ERR_INVALID_STATE;
+    }
+    const esp_err_t reserve_err = factory_system_update_source_reserve(
+        FACTORY_SYSTEM_UPDATE_OWNER_NAND, context->operation_id);
+    if (reserve_err != ESP_OK) {
+        nand_operation_release();
+        free(context);
+        return reserve_err;
     }
     update_source_status(FACTORY_NAND_UPDATE_STARTING, ESP_OK);
     if (xTaskCreate(nand_update_task, "nand_sysupdate",
                     CONFIG_IRIS_FACTORY_NAND_SYSTEM_UPDATE_TASK_STACK,
                     context, 4, &s_nand_task) != pdPASS) {
         nand_operation_release();
+        factory_system_update_source_abort(
+            FACTORY_SYSTEM_UPDATE_OWNER_NAND, context->operation_id,
+            ESP_ERR_NO_MEM);
         update_source_status(FACTORY_NAND_UPDATE_FAILED, ESP_ERR_NO_MEM);
         free(context);
         return ESP_ERR_NO_MEM;

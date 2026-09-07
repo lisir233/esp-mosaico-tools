@@ -10,7 +10,16 @@ from typing import Any, NoReturn, Sequence
 from urllib.parse import urlsplit
 
 from . import __version__
-from .commands import install, list_devices, monitor, recover, start_system_update
+from .commands import (
+    configure_recovery_network,
+    enter_recovery,
+    install,
+    list_devices,
+    monitor,
+    read_http_update_code,
+    recover,
+    start_system_update,
+)
 from .doctor import diagnose_host, print_diagnosis
 from .errors import MosaicoError
 from .runtime import RunContext
@@ -205,6 +214,53 @@ def build_parser() -> argparse.ArgumentParser:
     )
     recover_parser.add_argument(
         "--dry-run", action="store_true", help="Check only; do not build or write firmware"
+    )
+
+    enter_recovery_parser = commands.add_parser(
+        "enter-recovery",
+        help="Enter retained Recovery without installing firmware",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    enter_recovery_parser.add_argument(
+        "--device-id", help="Target Device ID; selected automatically when only one is available"
+    )
+    enter_recovery_parser.add_argument(
+        "--gateway-profile", help="ESP-Iris profile; use the local Gateway by default"
+    )
+    enter_recovery_parser.add_argument(
+        "--timeout", type=positive_timeout, default=30.0,
+        help="Recovery transition timeout in seconds",
+    )
+
+    recovery_wifi_parser = commands.add_parser(
+        "recovery-wifi",
+        help="Configure Recovery Wi-Fi through the active USB session",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    recovery_wifi_parser.add_argument(
+        "--ssid", required=True, help="Wi-Fi SSID; password is read without echo"
+    )
+    recovery_wifi_parser.add_argument(
+        "--device-id", help="Target Device ID; selected automatically when only one is available"
+    )
+    recovery_wifi_parser.add_argument(
+        "--gateway-profile", help="ESP-Iris profile; use the local Gateway by default"
+    )
+    recovery_wifi_parser.add_argument(
+        "--timeout", type=positive_timeout, default=30.0,
+        help="Wi-Fi connection timeout in seconds",
+    )
+
+    update_code_parser = commands.add_parser(
+        "http-update-code",
+        help="Open Recovery's HTTP Update page and read its code over USB",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    update_code_parser.add_argument(
+        "--device-id", help="Target Device ID; selected automatically when only one is available"
+    )
+    update_code_parser.add_argument(
+        "--gateway-profile", help="ESP-Iris profile; use the local Gateway by default"
     )
 
     monitor_parser = commands.add_parser(
@@ -433,6 +489,12 @@ def main(
             result = start_system_update(arguments, context)
         elif arguments.command == "recover":
             result = recover(arguments, context)
+        elif arguments.command == "enter-recovery":
+            result = enter_recovery(arguments, context)
+        elif arguments.command == "recovery-wifi":
+            result = configure_recovery_network(arguments, context)
+        elif arguments.command == "http-update-code":
+            result = read_http_update_code(arguments, context)
         else:
             return monitor(arguments, context, arguments.json)
     except MosaicoError as error:
@@ -446,6 +508,14 @@ def main(
     else:
         status = result.get("status", "succeeded")
         print(f"{arguments.command}: {status}")
+        if arguments.command == "http-update-code":
+            authorization = result.get("authorization", {})
+            print(f"HTTP update code: {authorization.get('code', '')}")
+            print(
+                "Expires in: "
+                f"{int(authorization.get('expires_in_ms', 0)) // 1000}s"
+            )
+            print(f"HTTP endpoint: {result.get('base_url', '')}")
         if arguments.command == "recover" and status == "dry_run":
             print("Checks passed; no firmware was built or written.")
         if arguments.verbose:

@@ -379,6 +379,7 @@ def gateway_json(
     *arguments: str,
     timeout: float = 15,
     environment: dict[str, str] | None = None,
+    stdin_text: str | None = None,
     sensitive_output: bool = False,
 ) -> Any:
     try:
@@ -386,6 +387,7 @@ def gateway_json(
             session.ctl_argv(*arguments),
             timeout=timeout,
             env=environment,
+            input_text=stdin_text,
             sensitive_output=sensitive_output,
         )
     except subprocess.TimeoutExpired as error:

@@ -16,11 +16,19 @@ the tools checkout the single source of its device-side Iris implementation.
 python3 submodule/esp-mosaico-tools/mosaico.py doctor
 python3 submodule/esp-mosaico-tools/mosaico.py install --project projects/app
 python3 submodule/esp-mosaico-tools/mosaico.py system-update --project projects/app
+python3 submodule/esp-mosaico-tools/mosaico.py enter-recovery
 ```
 
 `install` updates only the application OTA partition. `system-update` builds
 and submits the workspace's atomic application, UI assets, and system-data
 bundle by default; use `--skip-build` or `--bundle PATH` to reuse artifacts.
+`enter-recovery` asks a reachable normal application to boot the retained
+Recovery image without building or installing firmware. It waits for the same
+Device ID to reconnect in Recovery with a new Boot ID; use `--device-id` when
+more than one device is connected and `--timeout` to change the 30-second
+transition limit. Both numeric Boot IDs and exact `boot_id_text` fields are
+included in JSON output so 64-bit identities remain lossless for JavaScript
+consumers.
 
 The CLI searches the current directory and its parents for `.mosaico.json`.
 Use `--workspace PATH` to select another workspace explicitly.

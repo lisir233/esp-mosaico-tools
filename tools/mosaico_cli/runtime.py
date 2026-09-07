@@ -66,6 +66,7 @@ class RunContext:
         cwd: Path | None = None,
         check: bool = False,
         env: dict[str, str] | None = None,
+        input_text: str | None = None,
         output_status: Callable[[str], str | None] | None = None,
         sensitive_output: bool = False,
     ) -> subprocess.CompletedProcess[str]:
@@ -83,11 +84,14 @@ class RunContext:
                     text=True,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
+                    input=input_text,
                     timeout=timeout,
                     check=False,
                 )
                 self.note("[sensitive output omitted]" if sensitive_output else result.stdout or "")
             else:
+                if input_text is not None:
+                    raise ValueError("streaming commands do not accept stdin input")
                 result = self._run_streaming(
                     command,
                     timeout=timeout,

@@ -91,6 +91,49 @@ config IRIS_FACTORY_HTTP_SYSTEM_UPDATE_MANIFEST_URL
         Absolute URL of manifest.json. Component file names in the manifest
         are resolved relative to this URL. Leave empty to disable auto-start.
 
+config IRIS_FACTORY_HTTP_TRIGGER_SERVER
+    bool "Enable display-code HTTP System Update trigger"
+    default n
+    depends on IRIS_FACTORY_HTTP_SYSTEM_UPDATE
+    help
+        Run a bounded HTTP control server in Recovery. Clients authenticate
+        one update trigger with the six-digit code shown on the local HTTP
+        Update screen. The code is RAM-only, expires, locks globally after a
+        bounded number of failures, and is consumed before update admission.
+        Status reads use the returned random 128-bit operation ID. Firmware
+        bytes are never uploaded to this server; the request supplies a strict
+        HTTPS manifest URL for the existing System Update pull source.
+
+config IRIS_FACTORY_HTTP_TRIGGER_SERVER_PORT
+    int "HTTP trigger server port"
+    range 1024 65535
+    default 8080
+    depends on IRIS_FACTORY_HTTP_TRIGGER_SERVER
+
+config IRIS_FACTORY_HTTP_TRIGGER_SERVER_TASK_STACK
+    int "HTTP trigger server task stack size"
+    range 4096 12288
+    default 6144
+    depends on IRIS_FACTORY_HTTP_TRIGGER_SERVER
+
+config IRIS_FACTORY_HTTP_TRIGGER_CODE_TTL_MS
+    int "HTTP update code lifetime (milliseconds)"
+    range 10000 300000
+    default 60000
+    depends on IRIS_FACTORY_HTTP_TRIGGER_SERVER
+
+config IRIS_FACTORY_HTTP_TRIGGER_MAX_ATTEMPTS
+    int "Maximum failed HTTP update code attempts"
+    range 1 10
+    default 3
+    depends on IRIS_FACTORY_HTTP_TRIGGER_SERVER
+
+config IRIS_FACTORY_HTTP_TRIGGER_FAILURE_DELAY_MS
+    int "Minimum delay after a failed HTTP update code"
+    range 1000 5000
+    default 1000
+    depends on IRIS_FACTORY_HTTP_TRIGGER_SERVER
+
 config IRIS_FACTORY_NAND_SYSTEM_UPDATE
     bool "Enable recovery NAND LittleFS system-update source"
     default n

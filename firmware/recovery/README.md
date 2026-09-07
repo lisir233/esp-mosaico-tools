@@ -48,6 +48,20 @@ HTTPS 默认使用 ESP-IDF certificate bundle 验证服务器。明文 HTTP 仅�
 仍是 unsigned policy；面向非受控网络发布前必须加入并启用 manifest release-key
 验证。
 
+Recovery 同时在默认端口 `8080` 提供一次性屏幕验证码授权的 HTTP trigger。用户
+主动打开独立的 **HTTP Update** 页面后，设备在 RAM 中生成六位验证码并显示 60 秒
+倒计时；三次失败后锁定，正确码在解析 URL 和启动更新前原子消费，任何后续失败都
+不会恢复旧码。`POST /api/v1/system-update` 通过 `X-Mosaico-Pairing-Code` 接受严格
+JSON `{"manifest_url":"https://.../manifest.json"}` 并返回随机 128-bit operation
+ID；状态请求只通过 `X-Mosaico-Operation-ID` 查询对应 HTTP 操作，不会返回 USB 或
+NAND 更新状态。完整协议和参考客户端见
+[`docs/recovery-http-trigger.md`](../../docs/recovery-http-trigger.md)。
+
+真机自动化可先运行 `python mosaico.py recovery-wifi --ssid SSID`，密码只通过隐藏
+输入读取；`python mosaico.py http-update-code` 会经当前 USB ESP-Iris session 打开
+设备上的同一个 HTTP Update 页面并读取验证码。这两个 Recovery 控制接口均拒绝
+TCP 调用。
+
 ### Recovery 从 NAND LittleFS 读取系统更新
 
 ESP-Mosaico 的板载 NAND 与 `esp-mosaico-claw` 一致，使用 SPI NAND、wear-leveling

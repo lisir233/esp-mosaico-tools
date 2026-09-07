@@ -3,6 +3,8 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "factory_network.h"
+#include "factory_http_trigger_server.h"
+#include "factory_recovery_control.h"
 #include "factory_system_inventory.h"
 #include "factory_system_metadata.h"
 #include "factory_system_update.h"
@@ -25,6 +27,7 @@ void app_main(void)
      * after the transport is running. */
     ESP_ERROR_CHECK(factory_system_inventory_register());
     ESP_ERROR_CHECK(factory_system_update_register());
+    ESP_ERROR_CHECK(factory_recovery_control_register());
     recovery_ota_support_start();
 
     ESP_ERROR_CHECK(factory_ui_start());
@@ -46,6 +49,16 @@ void app_main(void)
         ESP_LOGE(TAG, "Factory network unavailable; USB recovery remains active: %s",
                  esp_err_to_name(network_err));
     }
+#if CONFIG_IRIS_FACTORY_HTTP_TRIGGER_SERVER
+    if (network_err == ESP_OK) {
+        const esp_err_t server_err = factory_http_trigger_server_start();
+        if (server_err != ESP_OK) {
+            ESP_LOGE(TAG,
+                     "HTTP update trigger unavailable; USB recovery remains active: %s",
+                     esp_err_to_name(server_err));
+        }
+    }
+#endif
 #if CONFIG_IRIS_FACTORY_HTTP_SYSTEM_UPDATE && \
     CONFIG_IRIS_FACTORY_HTTP_SYSTEM_UPDATE_AUTO_START
     if (network_err == ESP_OK &&
