@@ -1,0 +1,19 @@
+{
+  "schema": "esp-iris-system-update/v1",
+  "release": "@CONFIG_APP_PROJECT_VER@",
+  "minimum_recovery_version": "2.7.0-recovery",
+  "target": {
+    "chip_id": 32,
+    "flash_size": 16777216
+  },
+  "target_layout_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "components": [
+    {
+      "id": 1,
+      "kind": "recovery",
+      "target_offset": @recovery_partition_offset_decimal@,
+      "size": @recovery_partition_size_decimal@,
+      "file": "factory.bin"
+    }
+  ]
+}

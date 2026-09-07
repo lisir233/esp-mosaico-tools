@@ -10,6 +10,10 @@
 #if CONFIG_ESP_IRIS_SYSTEM_UPDATE && \
     CONFIG_IRIS_FACTORY_SYSTEM_UPDATE_BACKEND
 
+#if !CONFIG_SPIRAM_XIP_FROM_PSRAM
+#error "Recovery self-update requires CONFIG_SPIRAM_XIP_FROM_PSRAM"
+#endif
+
 #include "cJSON.h"
 #include "esp_app_desc.h"
 #include "esp_app_format.h"
@@ -34,6 +38,8 @@
 #define FACTORY_SYSTEM_RESTART_DELAY_MS 1800U
 #define FACTORY_SYSTEM_ESP32S31_CHIP_ID 0x20U
 #define FACTORY_SYSTEM_FLASH_SECTOR_BYTES 0x1000U
+#define FACTORY_SYSTEM_RECOVERY_OFFSET 0x20000U
+#define FACTORY_SYSTEM_RECOVERY_SIZE 0x1c0000U
 
 typedef struct {
     esp_iris_system_update_component_t descriptor;
@@ -55,8 +61,10 @@ typedef struct {
     uint8_t target_layout_sha256[ESP_IRIS_SYSTEM_SHA256_BYTES];
     uint8_t *bootloader_image;
     uint8_t *partition_table_image;
+    uint8_t *recovery_image;
     const esp_partition_t *active_partition;
     bool application_received;
+    bool recovery_update;
 } factory_update_state_t;
 
 static const char *TAG = "factory_sysupdate";
@@ -271,8 +279,10 @@ static void update_state_reset(void)
 {
     free(s_update.bootloader_image);
     free(s_update.partition_table_image);
+    free(s_update.recovery_image);
     s_update.bootloader_image = NULL;
     s_update.partition_table_image = NULL;
+    s_update.recovery_image = NULL;
     s_update.prepared = false;
     s_update.plan_count = 0;
     s_update.active_index = -1;
@@ -280,6 +290,7 @@ static void update_state_reset(void)
     s_update.target_layout_valid = false;
     s_update.active_partition = NULL;
     s_update.application_received = false;
+    s_update.recovery_update = false;
     memset(s_update.plan, 0, sizeof(s_update.plan));
     memset(s_update.operation_id, 0, sizeof(s_update.operation_id));
     memset(s_update.target_layout_sha256, 0,
@@ -341,6 +352,8 @@ static esp_err_t component_kind(const char *name,
         *kind = ESP_IRIS_SYSTEM_UPDATE_COMPONENT_BOOTLOADER;
     } else if (strcmp(name, "partition_table") == 0) {
         *kind = ESP_IRIS_SYSTEM_UPDATE_COMPONENT_PARTITION_TABLE;
+    } else if (strcmp(name, "recovery") == 0) {
+        *kind = ESP_IRIS_SYSTEM_UPDATE_COMPONENT_RECOVERY;
     } else if (strcmp(name, "data") == 0) {
         *kind = ESP_IRIS_SYSTEM_UPDATE_COMPONENT_DATA;
     } else {
@@ -414,6 +427,12 @@ static esp_err_t authorize_component_target(
     }
     if (component->kind == ESP_IRIS_SYSTEM_UPDATE_COMPONENT_APPLICATION) {
         return component->target_offset % FACTORY_SYSTEM_FLASH_SECTOR_BYTES == 0
+            ? ESP_OK
+            : ESP_ERR_INVALID_SIZE;
+    }
+    if (component->kind == ESP_IRIS_SYSTEM_UPDATE_COMPONENT_RECOVERY) {
+        return component->target_offset == FACTORY_SYSTEM_RECOVERY_OFFSET &&
+                       component->size == FACTORY_SYSTEM_RECOVERY_SIZE
             ? ESP_OK
             : ESP_ERR_INVALID_SIZE;
     }
@@ -562,9 +581,21 @@ static esp_err_t parse_manifest_json(
         seen_kinds[plan->descriptor.kind] = true;
         ++s_update.plan_count;
     }
-    if (!seen_kinds[ESP_IRIS_SYSTEM_UPDATE_COMPONENT_PARTITION_TABLE] ||
-        s_update.plan[0].descriptor.kind !=
-            ESP_IRIS_SYSTEM_UPDATE_COMPONENT_PARTITION_TABLE) {
+    s_update.recovery_update =
+        seen_kinds[ESP_IRIS_SYSTEM_UPDATE_COMPONENT_RECOVERY];
+    if (s_update.recovery_update) {
+        if (s_update.plan_count != 1U ||
+            s_update.plan[0].descriptor.kind !=
+                ESP_IRIS_SYSTEM_UPDATE_COMPONENT_RECOVERY) {
+            ESP_LOGE(TAG,
+                     "recovery update must contain only one recovery "
+                     "component");
+            err = ESP_ERR_INVALID_ARG;
+            goto done;
+        }
+    } else if (!seen_kinds[ESP_IRIS_SYSTEM_UPDATE_COMPONENT_PARTITION_TABLE] ||
+               s_update.plan[0].descriptor.kind !=
+                   ESP_IRIS_SYSTEM_UPDATE_COMPONENT_PARTITION_TABLE) {
         err = ESP_ERR_INVALID_ARG;
         goto done;
     }
@@ -576,6 +607,32 @@ static esp_err_t parse_manifest_json(
             err = ESP_ERR_INVALID_CRC;
             goto done;
         }
+    }
+    if (s_update.recovery_update) {
+        const esp_partition_t *running = esp_ota_get_running_partition();
+        if (running == NULL ||
+            running->type != ESP_PARTITION_TYPE_APP ||
+            running->subtype != ESP_PARTITION_SUBTYPE_APP_FACTORY ||
+            running->address != FACTORY_SYSTEM_RECOVERY_OFFSET ||
+            running->size != FACTORY_SYSTEM_RECOVERY_SIZE) {
+            ESP_LOGE(TAG,
+                     "recovery self-update requires the running factory slot");
+            err = ESP_ERR_INVALID_STATE;
+            goto done;
+        }
+        uint8_t current_layout_sha256[32];
+        err = hash_flash_region(CONFIG_PARTITION_TABLE_OFFSET,
+                                FACTORY_SYSTEM_FLASH_SECTOR_BYTES,
+                                current_layout_sha256);
+        if (err != ESP_OK ||
+            !bytes_equal(current_layout_sha256,
+                         s_update.target_layout_sha256, 32)) {
+            ESP_LOGE(TAG,
+                     "recovery source layout does not match manifest");
+            err = err == ESP_OK ? ESP_ERR_INVALID_VERSION : err;
+            goto done;
+        }
+        s_update.target_layout_valid = true;
     }
 
 done:
@@ -704,10 +761,19 @@ static esp_err_t begin_component(
         ESP_LOGI(TAG, "data partition erase complete: label=%s",
                  s_update.active_partition->label);
     } else {
-        uint8_t **destination =
-            component->kind == ESP_IRIS_SYSTEM_UPDATE_COMPONENT_BOOTLOADER
-            ? &s_update.bootloader_image
-            : &s_update.partition_table_image;
+        uint8_t **destination = NULL;
+        if (component->kind ==
+            ESP_IRIS_SYSTEM_UPDATE_COMPONENT_BOOTLOADER) {
+            destination = &s_update.bootloader_image;
+        } else if (component->kind ==
+                   ESP_IRIS_SYSTEM_UPDATE_COMPONENT_PARTITION_TABLE) {
+            destination = &s_update.partition_table_image;
+        } else if (component->kind ==
+                   ESP_IRIS_SYSTEM_UPDATE_COMPONENT_RECOVERY) {
+            destination = &s_update.recovery_image;
+        }
+        ESP_RETURN_ON_FALSE(destination != NULL, ESP_ERR_NOT_SUPPORTED, TAG,
+                            "unsupported staged component");
         free(*destination);
         *destination = heap_caps_malloc(component->size,
                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -746,10 +812,17 @@ static esp_err_t write_component(
                                   size)
             : ESP_ERR_INVALID_STATE;
     } else {
-        uint8_t *destination =
-            component->kind == ESP_IRIS_SYSTEM_UPDATE_COMPONENT_BOOTLOADER
-            ? s_update.bootloader_image
-            : s_update.partition_table_image;
+        uint8_t *destination = NULL;
+        if (component->kind ==
+            ESP_IRIS_SYSTEM_UPDATE_COMPONENT_BOOTLOADER) {
+            destination = s_update.bootloader_image;
+        } else if (component->kind ==
+                   ESP_IRIS_SYSTEM_UPDATE_COMPONENT_PARTITION_TABLE) {
+            destination = s_update.partition_table_image;
+        } else if (component->kind ==
+                   ESP_IRIS_SYSTEM_UPDATE_COMPONENT_RECOVERY) {
+            destination = s_update.recovery_image;
+        }
         if (destination == NULL) {
             return ESP_ERR_INVALID_STATE;
         }
@@ -764,17 +837,18 @@ static esp_err_t write_component(
     return err;
 }
 
-static esp_err_t validate_memory_image(const uint8_t *image, size_t size)
+static esp_err_t validate_memory_image(const uint8_t *image, size_t size,
+                                       const char *name)
 {
     ESP_RETURN_ON_FALSE(image != NULL && size >= sizeof(esp_image_header_t),
-                        ESP_ERR_IMAGE_INVALID, TAG, "short bootloader image");
+                        ESP_ERR_IMAGE_INVALID, TAG, "short %s image", name);
     const esp_image_header_t *header = (const esp_image_header_t *)image;
     ESP_RETURN_ON_FALSE(header->magic == ESP_IMAGE_HEADER_MAGIC &&
                             header->segment_count > 0 &&
                             header->segment_count <= ESP_IMAGE_MAX_SEGMENTS &&
                             header->chip_id == ESP_CHIP_ID_ESP32S31,
                         ESP_ERR_IMAGE_INVALID, TAG,
-                        "invalid bootloader header");
+                        "invalid %s header", name);
     size_t offset = sizeof(*header);
     uint8_t checksum = 0xef;
     for (uint8_t segment = 0; segment < header->segment_count; ++segment) {
@@ -796,23 +870,23 @@ static esp_err_t validate_memory_image(const uint8_t *image, size_t size)
     const size_t checksum_end = (offset + 1U + 15U) & ~(size_t)15U;
     ESP_RETURN_ON_FALSE(checksum_end <= size &&
                             image[checksum_end - 1U] == checksum,
-                        ESP_ERR_IMAGE_INVALID, TAG,
-                        "bootloader checksum mismatch");
+                            ESP_ERR_IMAGE_INVALID, TAG,
+                            "%s checksum mismatch", name);
     size_t image_end = checksum_end;
     if (header->hash_appended == 1) {
         ESP_RETURN_ON_FALSE(size - image_end >= 32, ESP_ERR_IMAGE_INVALID, TAG,
-                            "missing bootloader digest");
+                            "missing %s digest", name);
         uint8_t digest[32];
         ESP_RETURN_ON_ERROR(hash_memory(image, image_end, digest), TAG,
-                            "hash bootloader image");
+                            "hash %s image", name);
         ESP_RETURN_ON_FALSE(bytes_equal(digest, image + image_end, 32),
                             ESP_ERR_IMAGE_INVALID, TAG,
-                            "bootloader digest mismatch");
+                            "%s digest mismatch", name);
         image_end += 32;
     }
     for (size_t i = image_end; i < size; ++i) {
         ESP_RETURN_ON_FALSE(image[i] == 0xff, ESP_ERR_IMAGE_INVALID, TAG,
-                            "bootloader padding is not erased");
+                            "%s padding is not erased", name);
     }
     return ESP_OK;
 }
@@ -848,7 +922,7 @@ static const immutable_partition_contract_t s_immutable_partitions[] = {
     {ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_NVS, "sysmeta",
      0xc000, 0x14000},
     {ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, "factory",
-     0x20000, 0x1c0000},
+     FACTORY_SYSTEM_RECOVERY_OFFSET, FACTORY_SYSTEM_RECOVERY_SIZE},
     {ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_COREDUMP, "coredump",
      0x1e0000, 0x20000},
 };
@@ -1075,8 +1149,15 @@ static esp_err_t end_component(
     } else if (component->kind ==
                ESP_IRIS_SYSTEM_UPDATE_COMPONENT_BOOTLOADER) {
         ESP_GOTO_ON_ERROR(validate_memory_image(s_update.bootloader_image,
-                                                component->size), done, TAG,
+                                                component->size,
+                                                "bootloader"), done, TAG,
                           "bootloader validation");
+    } else if (component->kind ==
+               ESP_IRIS_SYSTEM_UPDATE_COMPONENT_RECOVERY) {
+        ESP_GOTO_ON_ERROR(validate_memory_image(s_update.recovery_image,
+                                                component->size,
+                                                "recovery"), done, TAG,
+                          "recovery validation");
     } else if (component->kind ==
                ESP_IRIS_SYSTEM_UPDATE_COMPONENT_PARTITION_TABLE) {
         ESP_GOTO_ON_ERROR(
@@ -1112,6 +1193,16 @@ static esp_err_t commit_protected_image(
                         ESP_ERR_INVALID_STATE, TAG,
                         "protected image is incomplete");
     const esp_iris_system_update_component_t *component = &plan->descriptor;
+    uint8_t digest[32];
+    ESP_RETURN_ON_ERROR(hash_flash_region(component->target_offset,
+                                          component->size, digest),
+                        TAG, "hash current protected component");
+    if (bytes_equal(digest, component->sha256, 32)) {
+        ESP_LOGI(TAG,
+                 "protected component already matches; skipping write: id=%u",
+                 component->id);
+        return ESP_OK;
+    }
     ESP_LOGW(TAG,
              "temporarily disabling dangerous-write protection: id=%u "
              "offset=0x%08" PRIx32 " size=%" PRIu32,
@@ -1141,7 +1232,6 @@ static esp_err_t commit_protected_image(
     }
     ESP_RETURN_ON_ERROR(ret, TAG, "write protected component");
 
-    uint8_t digest[32];
     ESP_RETURN_ON_ERROR(hash_flash_region(component->target_offset,
                                           component->size, digest),
                         TAG, "read back protected component");
@@ -1192,6 +1282,8 @@ static esp_err_t commit_update(
         ESP_IRIS_SYSTEM_UPDATE_COMPONENT_PARTITION_TABLE);
     const factory_update_plan_component_t *application = plan_for_kind(
         ESP_IRIS_SYSTEM_UPDATE_COMPONENT_APPLICATION);
+    const factory_update_plan_component_t *recovery = plan_for_kind(
+        ESP_IRIS_SYSTEM_UPDATE_COMPONENT_RECOVERY);
 
     ESP_LOGI(TAG, "system update commit started");
 
@@ -1212,6 +1304,23 @@ static esp_err_t commit_update(
                             "verify committed bootloader");
         ESP_LOGI(TAG, "bootloader committed and verified: image_length=%" PRIu32,
                  image_length);
+    }
+    if (recovery != NULL) {
+        ESP_LOGW(TAG, "committing running recovery image from PSRAM");
+    }
+    ESP_RETURN_ON_ERROR(commit_protected_image(
+                            recovery, s_update.recovery_image),
+                        TAG, "commit recovery");
+    if (recovery != NULL) {
+        esp_partition_pos_t recovery_position = {
+            .offset = recovery->descriptor.target_offset,
+            .size = recovery->descriptor.size,
+        };
+        esp_image_metadata_t metadata = {0};
+        ESP_RETURN_ON_ERROR(
+            esp_image_verify(ESP_IMAGE_VERIFY, &recovery_position, &metadata),
+            TAG, "verify committed recovery image");
+        ESP_LOGI(TAG, "recovery image committed and verified");
     }
     if (partition_table != NULL) {
         ESP_LOGI(TAG, "committing partition table");
@@ -1243,6 +1352,21 @@ static esp_err_t commit_update(
             configured->subtype == ota_partition->subtype,
             ESP_ERR_INVALID_STATE, TAG,
             "configured boot partition does not match ota_0");
+    }
+    if (recovery != NULL) {
+        const esp_partition_t *factory_partition = esp_partition_find_first(
+            ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY,
+            "factory");
+        ESP_RETURN_ON_FALSE(factory_partition != NULL, ESP_ERR_NOT_FOUND, TAG,
+                            "factory partition missing after self-update");
+        ESP_RETURN_ON_ERROR(esp_ota_set_boot_partition(factory_partition), TAG,
+                            "select updated recovery");
+        const esp_partition_t *configured = esp_ota_get_boot_partition();
+        ESP_RETURN_ON_FALSE(
+            configured != NULL &&
+                configured->subtype == ESP_PARTITION_SUBTYPE_APP_FACTORY,
+            ESP_ERR_INVALID_STATE, TAG,
+            "configured boot partition does not match recovery");
     }
     ESP_RETURN_ON_ERROR(persist_result(operation_id, ESP_OK), TAG,
                         "persist system update result");

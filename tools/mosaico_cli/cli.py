@@ -147,7 +147,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     system_update_parser = commands.add_parser(
         "system-update",
-        help="Build and install ota_0, ui_apps, and system as one transaction",
+        help="Install a validated multi-image or Recovery self-update bundle",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     system_update_source = system_update_parser.add_mutually_exclusive_group()

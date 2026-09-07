@@ -28,15 +28,22 @@ config IRIS_FACTORY_SYSTEM_UPDATE_BACKEND
     depends on ESP_IRIS_SYSTEM_UPDATE && !SECURE_FLASH_ENC_ENABLED
     help
         Accept unsigned manifests and allow recovery to update ota_0, the
-        bootloader and the partition table. Transport/session access control,
-        manifest/component SHA-256, image validation and protected-partition
-        policy still apply, but there is no release-key authentication.
+        bootloader, the partition table, or its own factory image.
+        Transport/session access control, manifest/component SHA-256, image
+        validation and protected-partition policy still apply, but there is no
+        release-key authentication.
 
         System-update v1 requires the current and target partition tables to
         contain the exact otadata, phy_init, sysmeta, factory Recovery and
         coredump contracts. Other partitions may change. Application and data
         images are written through descriptors derived from the validated
         target partition table before that table is committed last.
+
+        A factory self-update is an isolated Recovery-only transaction. The
+        partition table is not a component; its SHA-256 is an explicit source
+        layout precondition, and the factory image must cover the complete
+        fixed slot. It requires XIP from PSRAM and accepts a power-loss window
+        recoverable only through ROM download mode.
 
         This first product backend intentionally rejects flash-encrypted
         builds. System Inventory remains available without a writer.

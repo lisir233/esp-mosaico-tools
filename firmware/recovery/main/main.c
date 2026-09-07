@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "esp_err.h"
+#include "esp_iris.h"
 #include "esp_log.h"
 #include "factory_network.h"
 #include "factory_http_trigger_server.h"
@@ -72,5 +73,9 @@ void app_main(void)
     }
 #endif
 
+    /* This is the Recovery acceptance boundary used by the host's closed-loop
+     * self-update workflow.  esp_iris_mark_healthy() replays the event when a
+     * USB session connects after this point. */
+    ESP_ERROR_CHECK(esp_iris_mark_healthy());
     ESP_LOGI(TAG, "ESP-Mosaico factory recovery firmware is ready");
 }

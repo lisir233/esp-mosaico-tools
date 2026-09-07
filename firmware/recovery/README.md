@@ -26,6 +26,32 @@ python mosaico.py monitor
 Recovery 屏幕在普通 OTA 写入期间显示应用镜像接收进度、传输所有者和
 SHA-256 校验状态；完成后显示重启提示。System Update 继续复用同一进度页面。
 
+### Recovery 自更新（接受 ROM 兜底）
+
+维护者可从当前 Recovery 构建生成只含一个 `recovery` 组件的专用包：
+
+```sh
+idf.py -C firmware/recovery build recovery-self-update-bundle
+python mosaico.py system-update \
+  --bundle firmware/recovery/build/factory-recovery-update.irisfw
+```
+
+制包器把 `factory.bin` 以 `0xff` 补齐至整个 1.75 MiB `factory` 槽。分区表不作为
+组件进入包；制包时只把它的 SHA-256 写入顶层 `target_layout_sha256`，作为明确的
+设备布局前置条件。设备先确认当前分区表哈希满足该条件，再在 PSRAM 中分配连续的
+完整槽位、接收并校验 SHA-256 和 ESP32-S31 镜像。只有全部预检通过后，才会临时
+关闭 dangerous write protection，原地擦写 `factory`，恢复保护，再执行整槽读回
+SHA-256 和 `esp_image_verify()`。成功后将下一次启动明确指向 `factory`，保存
+operation receipt，并延迟重启；Gateway 必须观察到相同 Device ID、新 Boot ID、
+`recovery` mode、目标 project/ELF SHA-256 和 HEALTHY 才报告成功。
+
+该路径不改 bootloader 或 Flash 布局，也不与 normal application/data 更新混包。
+它仍是单副本原地更新：从开始擦除到完成校验之间掉电，可能导致 Recovery 无法启动，
+此时需按仓库规定进入 ROM download mode；开发期间运行
+`python mosaico.py recover --source current` 恢复本分支构建，发布后则使用已评审的
+Recovery 包。首次部署具备自更新能力的 `2.7.0-recovery` 也必须走该 ROM/`recover`
+路径；旧 Recovery 没有执行自更新事务的代码。
+
 ### Recovery 从 HTTP(S) 拉取系统更新
 
 Recovery 固件默认编译 HTTP(S) System Update source，但不会自动访问网络。

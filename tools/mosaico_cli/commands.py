@@ -474,7 +474,7 @@ def start_system_update(arguments: Any, context: RunContext) -> dict[str, Any]:
             bundle=bundle,
             timeout=timeout,
         )
-        context.status("validation: application and system partitions are healthy")
+        context.status("validation: target firmware and system partitions are healthy")
         return {
             "command": "system-update",
             "status": "succeeded",

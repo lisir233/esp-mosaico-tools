@@ -41,7 +41,9 @@ typedef struct {
     uint8_t operation_id[ESP_IRIS_SYSTEM_OPERATION_ID_BYTES];
 } factory_http_update_snapshot_t;
 
-/* Register the recovery-only, product-owned Flash-policy backend.
+/* Register the Recovery-resident, product-owned Flash-policy backend.
+ * A Recovery self-update is staged completely in PSRAM before the backend
+ * temporarily unlocks and rewrites the running factory partition.
  * When the backend is disabled, this remains a successful no-op and the
  * read-only System Inventory service is still available. */
 esp_err_t factory_system_update_register(void);

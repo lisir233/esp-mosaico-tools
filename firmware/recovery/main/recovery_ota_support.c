@@ -137,6 +137,15 @@ esp_err_t esp_iris_platform_mark_planned_restart(void)
                           recovery_read_u32("target"), true);
 }
 
+esp_err_t esp_iris_platform_mark_healthy(void)
+{
+    /* Recovery always boots from the fixed factory slot and has no pending
+     * application rollback state to accept.  The product-level healthy mark
+     * therefore only authorizes ESP-Iris to publish its replayable HEALTHY
+     * event after app_main has initialized every Recovery service. */
+    return ESP_OK;
+}
+
 static esp_err_t state_rpc(const esp_iris_rpc_request_t *request,
                            uint8_t *response, size_t response_capacity,
                            size_t *response_size, void *user_ctx)

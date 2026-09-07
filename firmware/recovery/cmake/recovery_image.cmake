@@ -33,6 +33,14 @@ set(recovery_source_partition_table
     "${CMAKE_BINARY_DIR}/partition_table/partition-table.bin")
 set(recovery_source_ota_data "${CMAKE_BINARY_DIR}/ota_data_initial.bin")
 set(recovery_source_application "${CMAKE_BINARY_DIR}/${PROJECT_NAME}.bin")
+set(recovery_self_update_component_dir
+    "${CMAKE_BINARY_DIR}/recovery-self-update-components")
+set(recovery_self_update_manifest
+    "${CMAKE_BINARY_DIR}/recovery-self-update-manifest.json")
+set(recovery_self_update_bundle
+    "${CMAKE_BINARY_DIR}/${PROJECT_NAME}-recovery-update.irisfw")
+set(recovery_bundle_tool
+    "${CMAKE_CURRENT_LIST_DIR}/../../../submodule/esp-iris/components/esp_iris/tools/system_update_bundle.py")
 
 set(recovery_bundle_files
     bootloader.bin partition-table.bin ota_data_initial.bin factory.bin manifest.json)
@@ -108,6 +116,46 @@ add_custom_target(recovery-current-bundle
     VERBATIM)
 add_dependencies(recovery-current-bundle app bootloader partition_table_bin blank_ota_data)
 
+if(NOT CONFIG_SPIRAM_XIP_FROM_PSRAM)
+    message(FATAL_ERROR
+        "Recovery self-update requires CONFIG_SPIRAM_XIP_FROM_PSRAM")
+endif()
+if(NOT CONFIG_ESPTOOLPY_FLASHSIZE_16MB)
+    message(FATAL_ERROR
+        "Recovery self-update bundle currently requires the 16 MiB product layout")
+endif()
+
+math(EXPR recovery_partition_offset_decimal
+    "${recovery_partition_offset}" OUTPUT_FORMAT DECIMAL)
+math(EXPR recovery_partition_size_decimal
+    "${recovery_partition_size}" OUTPUT_FORMAT DECIMAL)
+configure_file(
+    "${CMAKE_CURRENT_LIST_DIR}/../recovery-self-update-manifest.template.json.in"
+    "${recovery_self_update_manifest}"
+    @ONLY)
+
+# This target produces a single-component Recovery system-update archive. The
+# partition table is hashed as an explicit layout precondition but is never
+# included as a component. The builder pads factory.bin to the complete factory
+# slot so the device can verify one deterministic protected range from PSRAM.
+add_custom_target(recovery-self-update-bundle
+    COMMAND "${CMAKE_COMMAND}" -E make_directory
+        "${recovery_self_update_component_dir}"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        "${recovery_source_application}"
+        "${recovery_self_update_component_dir}/factory.bin"
+    COMMAND "${recovery_python}" "${recovery_bundle_tool}"
+        "${recovery_self_update_manifest}"
+        --component-root "${recovery_self_update_component_dir}"
+        --target-layout "${recovery_source_partition_table}"
+        --output "${recovery_self_update_bundle}"
+    BYPRODUCTS "${recovery_self_update_bundle}"
+    DEPENDS "${recovery_bundle_tool}" "${recovery_source_partition_table}"
+        "${CMAKE_CURRENT_LIST_DIR}/../recovery-self-update-manifest.template.json.in"
+    COMMENT "Packaging the current Recovery as a self-update bundle"
+    VERBATIM)
+add_dependencies(recovery-self-update-bundle app partition_table_bin)
+
 add_custom_target(update-recovery-prebuilt
     COMMAND "${recovery_python}" "${recovery_tool}"
         ${recovery_source_inputs}
@@ -159,3 +207,5 @@ esptool_py_flash_to_partition(
 
 message(STATUS
     "Recovery bundle source for mosaico-recover-flash: ${MOSAICO_RECOVERY_SOURCE}")
+message(STATUS
+    "Recovery self-update bundle: ${recovery_self_update_bundle}")
