@@ -28,8 +28,7 @@ static bool is_ota_partition(const esp_partition_t *partition)
            partition->subtype <= ESP_PARTITION_SUBTYPE_APP_OTA_MAX;
 }
 
-static esp_err_t recovery_write(uint32_t last_good, uint32_t target,
-                                bool planned)
+static esp_err_t recovery_write(uint32_t last_good, uint32_t target)
 {
     nvs_handle_t handle;
     ESP_RETURN_ON_ERROR(
@@ -41,9 +40,6 @@ static esp_err_t recovery_write(uint32_t last_good, uint32_t target,
     esp_err_t err = nvs_set_u32(handle, "last_good", last_good);
     if (err == ESP_OK) {
         err = nvs_set_u32(handle, "target", target);
-    }
-    if (err == ESP_OK) {
-        err = nvs_set_u8(handle, "planned", planned ? 1 : 0);
     }
     if (err == ESP_OK) {
         err = nvs_commit(handle);
@@ -65,19 +61,6 @@ static uint32_t recovery_read_u32(const char *key)
     return value;
 }
 
-static uint8_t recovery_read_u8(const char *key)
-{
-    nvs_handle_t handle;
-    uint8_t value = 0;
-    if (nvs_open_from_partition(FACTORY_SYSTEM_METADATA_PARTITION,
-                                FACTORY_SYSTEM_METADATA_OTA_NAMESPACE,
-                                NVS_READONLY, &handle) == ESP_OK) {
-        (void)nvs_get_u8(handle, key, &value);
-        nvs_close(handle);
-    }
-    return value;
-}
-
 esp_err_t esp_iris_platform_prepare_ota(uint32_t running_address,
                                        uint32_t target_address)
 {
@@ -92,8 +75,7 @@ esp_err_t esp_iris_platform_prepare_ota(uint32_t running_address,
         return ESP_ERR_INVALID_STATE;
     }
 
-    return recovery_write(recovery_read_u32("last_good"), target_address,
-                          false);
+    return recovery_write(recovery_read_u32("last_good"), target_address);
 }
 
 esp_err_t esp_iris_platform_select_ota_target(uint32_t default_address,
@@ -131,12 +113,6 @@ esp_err_t esp_iris_platform_select_ota_target(uint32_t default_address,
                : ESP_ERR_NOT_FOUND;
 }
 
-esp_err_t esp_iris_platform_mark_planned_restart(void)
-{
-    return recovery_write(recovery_read_u32("last_good"),
-                          recovery_read_u32("target"), true);
-}
-
 esp_err_t esp_iris_platform_mark_healthy(void)
 {
     /* Recovery always boots from the fixed factory slot and has no pending
@@ -165,17 +141,20 @@ static esp_err_t state_rpc(const esp_iris_rpc_request_t *request,
     esp_ota_img_states_t image_state;
     const esp_err_t state_err = esp_ota_get_state_partition(running,
                                                              &image_state);
+    esp_iris_status_t iris_status = {0};
+    (void)esp_iris_get_status(&iris_status);
     const int written = snprintf(
         (char *)response, response_capacity,
         "{\"project\":\"%s\",\"version\":\"%s\",\"mode\":\"recovery\","
         "\"ota_execution\":\"recovery-writer\",\"ota_writer\":true,"
         "\"running\":\"%s\",\"next\":\"%s\",\"image_state\":%d,"
         "\"last_good\":%" PRIu32 ",\"target\":%" PRIu32
-        ",\"planned\":%u}",
+        ",\"crash_count\":%" PRIu32 ",\"crash_recovery_pending\":%u}",
         app->project_name, app->version, running->label, next->label,
         state_err == ESP_OK ? (int)image_state : -1,
         recovery_read_u32("last_good"), recovery_read_u32("target"),
-        recovery_read_u8("planned"));
+        iris_status.crash_count,
+        iris_status.crash_recovery_pending ? 1U : 0U);
 
     if (written < 0 || (size_t)written >= response_capacity) {
         return ESP_ERR_INVALID_SIZE;

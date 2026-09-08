@@ -19,6 +19,7 @@ static const char *TAG = "factory";
 
 void app_main(void)
 {
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_iris_boot_probe());
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(factory_system_metadata_init());
 

@@ -21,6 +21,7 @@
 #include "esp_flash.h"
 #include "esp_flash_partitions.h"
 #include "esp_heap_caps.h"
+#include "esp_iris.h"
 #include "esp_iris_system_update.h"
 #include "esp_image_format.h"
 #include "esp_log.h"
@@ -1330,6 +1331,12 @@ static esp_err_t commit_update(
                         TAG, "commit partition table");
     if (partition_table != NULL) {
         ESP_LOGI(TAG, "partition table committed and verified");
+    }
+    if (s_update.application_received || recovery != NULL) {
+        ESP_RETURN_ON_ERROR(esp_iris_crash_loop_reset(), TAG,
+                            "reset Iris crash-loop state");
+        ESP_RETURN_ON_ERROR(esp_iris_mark_planned_restart(), TAG,
+                            "record planned system-update restart");
     }
     if (s_update.application_received) {
         ESP_RETURN_ON_FALSE(
