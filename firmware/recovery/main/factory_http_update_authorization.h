@@ -34,16 +34,18 @@ typedef struct {
     uint8_t remaining_attempts;
 } factory_http_update_code_snapshot_t;
 
-/* Generate a new, uniformly distributed six-digit code. This is called only
- * from a local UI action or a USB-only Recovery control RPC. */
+/* Generate a new, uniformly distributed six-digit code and start a fresh
+ * rotation interval. This is called only from a local UI action or a USB-only
+ * Recovery control RPC. */
 esp_err_t factory_http_update_code_generate(void);
 
 /* Cancel a code which has not yet authorized an update. Consumed/running
  * authorization cannot be rolled back into an available code. */
 void factory_http_update_code_cancel(void);
 
-/* Validate and atomically consume the supplied code. Missing and malformed
- * values count as failed attempts while a code is available. */
+/* Validate and atomically consume the supplied code. An elapsed interval is
+ * rotated before validation. Missing and malformed values count as failed
+ * attempts while a code is available. */
 factory_http_update_code_result_t factory_http_update_code_consume(
     const char *supplied_code);
 
@@ -53,6 +55,8 @@ void factory_http_update_code_mark_running(void);
 void factory_http_update_code_mark_start_failed(void);
 void factory_http_update_code_mark_update_failed(void);
 
+/* Return the current display state, rotating an elapsed available/locked
+ * interval first. A locked snapshot reports its time until automatic reset. */
 esp_err_t factory_http_update_code_get_snapshot(
     factory_http_update_code_snapshot_t *snapshot);
 

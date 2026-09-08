@@ -499,7 +499,7 @@ static void http_update_auth_screen_create(void)
 
     lv_obj_t *warning = label_create(
         s_ui.http_update_auth_screen,
-        "This code allows one unsigned system update.\nUse only on a trusted local network.",
+        "This code rotates automatically and allows one unsigned update.\nUse only on a trusted local network.",
         &lv_font_montserrat_12, COLOR_MUTED);
     lv_obj_set_width(warning, 368);
     lv_obj_set_style_text_align(warning, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
@@ -537,20 +537,22 @@ static void http_update_auth_screen_update(
     case FACTORY_HTTP_UPDATE_CODE_AVAILABLE:
         lv_label_set_text(s_ui.http_update_code, snapshot.code);
         lv_label_set_text_fmt(
-            s_ui.http_update_code_detail, "%lus remaining - %u attempt%s",
+            s_ui.http_update_code_detail, "Rotates in %lus - %u attempt%s",
             (unsigned long)((snapshot.remaining_ms + 999U) / 1000U),
             snapshot.remaining_attempts,
             snapshot.remaining_attempts == 1U ? "" : "s");
         break;
     case FACTORY_HTTP_UPDATE_CODE_EXPIRED:
-        lv_label_set_text(s_ui.http_update_code, "EXPIRED");
+        lv_label_set_text(s_ui.http_update_code, "------");
         lv_label_set_text(s_ui.http_update_code_detail,
-                          "Generate a new code on this screen");
+                          "Rotating code");
         break;
     case FACTORY_HTTP_UPDATE_CODE_LOCKED:
         lv_label_set_text(s_ui.http_update_code, "LOCKED");
-        lv_label_set_text(s_ui.http_update_code_detail,
-                          "Too many attempts - generate a new code");
+        lv_label_set_text_fmt(
+            s_ui.http_update_code_detail,
+            "Too many attempts - resets in %lus",
+            (unsigned long)((snapshot.remaining_ms + 999U) / 1000U));
         break;
     case FACTORY_HTTP_UPDATE_CODE_CONSUMED:
         can_generate = false;

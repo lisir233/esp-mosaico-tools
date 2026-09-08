@@ -13,11 +13,15 @@ and the current product manifest policy remains unsigned.
 
 ## Authorization lifecycle
 
-The operator opens **HTTP Update** on the device. Recovery generates one
-uniformly random six-digit code, keeps it only in RAM, and displays its 60
-second countdown and remaining attempts. Leaving the page or pressing Cancel
-invalidates an unused code. Three failed attempts lock the code until a person
-generates a new one on the screen.
+The operator opens **HTTP Update** on the device. Recovery generates a
+uniformly random six-digit code, keeps it only in RAM, and displays its 180
+second rotation countdown and remaining attempts. When the countdown reaches
+zero, Recovery invalidates the old code, generates a new code, resets the
+attempt counter, and starts another 180 second interval. Rotation continues
+only while the page remains open; leaving the page or pressing Cancel
+invalidates the current unused code and stops rotation. Three failed attempts
+lock the current interval; its deadline automatically generates and unlocks a
+new code. A local **Generate new** action rotates immediately.
 
 A correct code is atomically consumed before parsing the manifest URL or
 admitting the update. Malformed requests, a busy writer, allocation failure, or

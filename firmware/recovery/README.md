@@ -75,12 +75,15 @@ HTTPS 默认使用 ESP-IDF certificate bundle 验证服务器。明文 HTTP 仅�
 验证。
 
 Recovery 同时在默认端口 `8080` 提供一次性屏幕验证码授权的 HTTP trigger。用户
-主动打开独立的 **HTTP Update** 页面后，设备在 RAM 中生成六位验证码并显示 60 秒
-倒计时；三次失败后锁定，正确码在解析 URL 和启动更新前原子消费，任何后续失败都
-不会恢复旧码。`POST /api/v1/system-update` 通过 `X-Mosaico-Pairing-Code` 接受严格
-JSON `{"manifest_url":"https://.../manifest.json"}` 并返回随机 128-bit operation
-ID；状态请求只通过 `X-Mosaico-Operation-ID` 查询对应 HTTP 操作，不会返回 USB 或
-NAND 更新状态。完整协议和参考客户端见
+主动打开独立的 **HTTP Update** 页面后，设备在 RAM 中生成六位验证码并显示 180 秒
+轮换倒计时。倒计时结束后旧码立即失效，设备自动生成新码并重置失败次数；只要页面
+保持打开就会继续轮换，离开页面或按下 Cancel 后停止。三次失败会锁定当前周期，到达
+当前周期截止时间后自动换码并解锁。正确码在解析 URL 和启动更新前原子消费，任何
+后续失败都不会恢复旧码。`POST /api/v1/system-update` 通过
+`X-Mosaico-Pairing-Code` 接受严格 JSON
+`{"manifest_url":"https://.../manifest.json"}` 并返回随机 128-bit operation ID；状态
+请求只通过 `X-Mosaico-Operation-ID` 查询对应 HTTP 操作，不会返回 USB 或 NAND 更新
+状态。完整协议和参考客户端见
 [`docs/recovery-http-trigger.md`](../../docs/recovery-http-trigger.md)。
 
 真机自动化可先运行 `python mosaico.py recovery-wifi --ssid SSID`，密码只通过隐藏

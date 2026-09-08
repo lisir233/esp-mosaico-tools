@@ -124,10 +124,14 @@ config IRIS_FACTORY_HTTP_TRIGGER_SERVER_TASK_STACK
     depends on IRIS_FACTORY_HTTP_TRIGGER_SERVER
 
 config IRIS_FACTORY_HTTP_TRIGGER_CODE_TTL_MS
-    int "HTTP update code lifetime (milliseconds)"
+    int "HTTP update code rotation interval (milliseconds)"
     range 10000 300000
-    default 60000
+    default 180000
     depends on IRIS_FACTORY_HTTP_TRIGGER_SERVER
+    help
+        Rotate the six-digit authorization code after this interval while the
+        HTTP Update page remains open. The old code becomes invalid and the
+        failed-attempt counter resets for the new interval.
 
 config IRIS_FACTORY_HTTP_TRIGGER_MAX_ATTEMPTS
     int "Maximum failed HTTP update code attempts"

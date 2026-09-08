@@ -20,6 +20,7 @@ typedef struct {
     char code[FACTORY_HTTP_UPDATE_CODE_BYTES];
     int64_t expires_us;
     uint8_t failed_attempts;
+    uint32_t generation;
 } factory_http_update_code_context_t;
 
 static factory_http_update_code_context_t s_code;
@@ -30,16 +31,6 @@ static void secure_clear(void *data, size_t size)
     volatile uint8_t *cursor = data;
     while (size-- > 0) {
         *cursor++ = 0;
-    }
-}
-
-static void expire_locked(int64_t now)
-{
-    if (s_code.state == FACTORY_HTTP_UPDATE_CODE_AVAILABLE &&
-        now >= s_code.expires_us) {
-        secure_clear(s_code.code, sizeof(s_code.code));
-        s_code.state = FACTORY_HTTP_UPDATE_CODE_EXPIRED;
-        s_code.expires_us = 0;
     }
 }
 
@@ -56,15 +47,70 @@ static uint32_t uniform_code_value(void)
     return value % FACTORY_HTTP_UPDATE_CODE_RANGE;
 }
 
-esp_err_t factory_http_update_code_generate(void)
+static esp_err_t random_code(char code[FACTORY_HTTP_UPDATE_CODE_BYTES])
 {
     const uint32_t value = uniform_code_value();
-    char code[FACTORY_HTTP_UPDATE_CODE_BYTES];
-    const int written = snprintf(code, sizeof(code), "%06lu",
+    const int written = snprintf(code, FACTORY_HTTP_UPDATE_CODE_BYTES, "%06lu",
                                  (unsigned long)value);
     if (written != FACTORY_HTTP_UPDATE_CODE_DIGITS) {
-        secure_clear(code, sizeof(code));
+        secure_clear(code, FACTORY_HTTP_UPDATE_CODE_BYTES);
         return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+static bool code_is_due_locked(int64_t now)
+{
+    return (s_code.state == FACTORY_HTTP_UPDATE_CODE_AVAILABLE ||
+            s_code.state == FACTORY_HTTP_UPDATE_CODE_LOCKED) &&
+           s_code.expires_us > 0 && now >= s_code.expires_us;
+}
+
+/* Claim an expired interval under the lock, generate randomness outside the
+ * critical section, then publish only if no newer local action superseded it. */
+static bool rotate_code_if_due(void)
+{
+    uint32_t generation = 0;
+    bool rotate = false;
+    taskENTER_CRITICAL(&s_code_lock);
+    if (code_is_due_locked(esp_timer_get_time())) {
+        secure_clear(s_code.code, sizeof(s_code.code));
+        s_code.failed_attempts = 0;
+        s_code.expires_us = 0;
+        s_code.state = FACTORY_HTTP_UPDATE_CODE_EXPIRED;
+        generation = ++s_code.generation;
+        rotate = true;
+    }
+    taskEXIT_CRITICAL(&s_code_lock);
+
+    if (!rotate) {
+        return false;
+    }
+
+    char code[FACTORY_HTTP_UPDATE_CODE_BYTES];
+    if (random_code(code) != ESP_OK) {
+        return true;
+    }
+
+    taskENTER_CRITICAL(&s_code_lock);
+    if (s_code.state == FACTORY_HTTP_UPDATE_CODE_EXPIRED &&
+        s_code.generation == generation) {
+        memcpy(s_code.code, code, sizeof(s_code.code));
+        s_code.expires_us = esp_timer_get_time() +
+            (int64_t)CONFIG_IRIS_FACTORY_HTTP_TRIGGER_CODE_TTL_MS * 1000;
+        s_code.state = FACTORY_HTTP_UPDATE_CODE_AVAILABLE;
+    }
+    taskEXIT_CRITICAL(&s_code_lock);
+    secure_clear(code, sizeof(code));
+    return true;
+}
+
+esp_err_t factory_http_update_code_generate(void)
+{
+    char code[FACTORY_HTTP_UPDATE_CODE_BYTES];
+    esp_err_t err = random_code(code);
+    if (err != ESP_OK) {
+        return err;
     }
 
     esp_err_t result = ESP_OK;
@@ -78,6 +124,7 @@ esp_err_t factory_http_update_code_generate(void)
         s_code.expires_us = esp_timer_get_time() +
             (int64_t)CONFIG_IRIS_FACTORY_HTTP_TRIGGER_CODE_TTL_MS * 1000;
         s_code.state = FACTORY_HTTP_UPDATE_CODE_AVAILABLE;
+        ++s_code.generation;
     }
     taskEXIT_CRITICAL(&s_code_lock);
     secure_clear(code, sizeof(code));
@@ -93,6 +140,7 @@ void factory_http_update_code_cancel(void)
         s_code.state = FACTORY_HTTP_UPDATE_CODE_DISABLED;
         s_code.expires_us = 0;
         s_code.failed_attempts = 0;
+        ++s_code.generation;
     }
     taskEXIT_CRITICAL(&s_code_lock);
 }
@@ -110,32 +158,41 @@ factory_http_update_code_result_t factory_http_update_code_consume(
         canonical = canonical && character >= '0' && character <= '9';
     }
 
-    factory_http_update_code_result_t result =
-        FACTORY_HTTP_UPDATE_CODE_UNAVAILABLE;
-    taskENTER_CRITICAL(&s_code_lock);
-    expire_locked(esp_timer_get_time());
-    if (s_code.state == FACTORY_HTTP_UPDATE_CODE_AVAILABLE) {
-        uint8_t difference = canonical ? 0U : 1U;
-        for (size_t i = 0; i < FACTORY_HTTP_UPDATE_CODE_DIGITS; ++i) {
-            difference |= (uint8_t)(candidate[i] ^ s_code.code[i]);
+    factory_http_update_code_result_t result;
+    for (;;) {
+        (void)rotate_code_if_due();
+        taskENTER_CRITICAL(&s_code_lock);
+        if (code_is_due_locked(esp_timer_get_time())) {
+            taskEXIT_CRITICAL(&s_code_lock);
+            continue;
         }
-        if (difference == 0) {
-            secure_clear(s_code.code, sizeof(s_code.code));
-            s_code.expires_us = 0;
-            s_code.state = FACTORY_HTTP_UPDATE_CODE_CONSUMED;
-            result = FACTORY_HTTP_UPDATE_CODE_ACCEPTED;
-        } else {
-            ++s_code.failed_attempts;
-            if (s_code.failed_attempts >=
-                CONFIG_IRIS_FACTORY_HTTP_TRIGGER_MAX_ATTEMPTS) {
+        result = FACTORY_HTTP_UPDATE_CODE_UNAVAILABLE;
+        if (s_code.state == FACTORY_HTTP_UPDATE_CODE_AVAILABLE) {
+            uint8_t difference = canonical ? 0U : 1U;
+            for (size_t i = 0; i < FACTORY_HTTP_UPDATE_CODE_DIGITS; ++i) {
+                difference |= (uint8_t)(candidate[i] ^ s_code.code[i]);
+            }
+            if (difference == 0) {
                 secure_clear(s_code.code, sizeof(s_code.code));
                 s_code.expires_us = 0;
-                s_code.state = FACTORY_HTTP_UPDATE_CODE_LOCKED;
+                s_code.state = FACTORY_HTTP_UPDATE_CODE_CONSUMED;
+                ++s_code.generation;
+                result = FACTORY_HTTP_UPDATE_CODE_ACCEPTED;
+            } else {
+                ++s_code.failed_attempts;
+                if (s_code.failed_attempts >=
+                    CONFIG_IRIS_FACTORY_HTTP_TRIGGER_MAX_ATTEMPTS) {
+                    secure_clear(s_code.code, sizeof(s_code.code));
+                    /* Preserve the interval deadline so the lock clears only
+                     * when the next code is due to be generated. */
+                    s_code.state = FACTORY_HTTP_UPDATE_CODE_LOCKED;
+                }
+                result = FACTORY_HTTP_UPDATE_CODE_REJECTED;
             }
-            result = FACTORY_HTTP_UPDATE_CODE_REJECTED;
         }
+        taskEXIT_CRITICAL(&s_code_lock);
+        break;
     }
-    taskEXIT_CRITICAL(&s_code_lock);
     secure_clear(candidate, sizeof(candidate));
     return result;
 }
@@ -145,6 +202,7 @@ void factory_http_update_code_mark_running(void)
     taskENTER_CRITICAL(&s_code_lock);
     if (s_code.state == FACTORY_HTTP_UPDATE_CODE_CONSUMED) {
         s_code.state = FACTORY_HTTP_UPDATE_CODE_UPDATE_RUNNING;
+        ++s_code.generation;
     }
     taskEXIT_CRITICAL(&s_code_lock);
 }
@@ -155,6 +213,7 @@ void factory_http_update_code_mark_start_failed(void)
     if (s_code.state == FACTORY_HTTP_UPDATE_CODE_CONSUMED ||
         s_code.state == FACTORY_HTTP_UPDATE_CODE_UPDATE_RUNNING) {
         s_code.state = FACTORY_HTTP_UPDATE_CODE_START_FAILED;
+        ++s_code.generation;
     }
     taskEXIT_CRITICAL(&s_code_lock);
 }
@@ -164,6 +223,7 @@ void factory_http_update_code_mark_update_failed(void)
     taskENTER_CRITICAL(&s_code_lock);
     if (s_code.state == FACTORY_HTTP_UPDATE_CODE_UPDATE_RUNNING) {
         s_code.state = FACTORY_HTTP_UPDATE_CODE_START_FAILED;
+        ++s_code.generation;
     }
     taskEXIT_CRITICAL(&s_code_lock);
 }
@@ -174,21 +234,31 @@ esp_err_t factory_http_update_code_get_snapshot(
     if (snapshot == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    const int64_t now = esp_timer_get_time();
-    taskENTER_CRITICAL(&s_code_lock);
-    expire_locked(now);
-    memset(snapshot, 0, sizeof(*snapshot));
-    snapshot->state = s_code.state;
-    if (s_code.state == FACTORY_HTTP_UPDATE_CODE_AVAILABLE) {
-        memcpy(snapshot->code, s_code.code, sizeof(snapshot->code));
-        const int64_t remaining_us = s_code.expires_us - now;
-        snapshot->remaining_ms = remaining_us > 0
-            ? (uint32_t)((remaining_us + 999) / 1000) : 0;
-        snapshot->remaining_attempts =
-            CONFIG_IRIS_FACTORY_HTTP_TRIGGER_MAX_ATTEMPTS -
-            s_code.failed_attempts;
+    for (;;) {
+        (void)rotate_code_if_due();
+        const int64_t now = esp_timer_get_time();
+        taskENTER_CRITICAL(&s_code_lock);
+        if (code_is_due_locked(now)) {
+            taskEXIT_CRITICAL(&s_code_lock);
+            continue;
+        }
+        memset(snapshot, 0, sizeof(*snapshot));
+        snapshot->state = s_code.state;
+        if (s_code.state == FACTORY_HTTP_UPDATE_CODE_AVAILABLE) {
+            memcpy(snapshot->code, s_code.code, sizeof(snapshot->code));
+            snapshot->remaining_attempts =
+                CONFIG_IRIS_FACTORY_HTTP_TRIGGER_MAX_ATTEMPTS -
+                s_code.failed_attempts;
+        }
+        if (s_code.state == FACTORY_HTTP_UPDATE_CODE_AVAILABLE ||
+            s_code.state == FACTORY_HTTP_UPDATE_CODE_LOCKED) {
+            const int64_t remaining_us = s_code.expires_us - now;
+            snapshot->remaining_ms = remaining_us > 0
+                ? (uint32_t)((remaining_us + 999) / 1000) : 0;
+        }
+        taskEXIT_CRITICAL(&s_code_lock);
+        break;
     }
-    taskEXIT_CRITICAL(&s_code_lock);
     return ESP_OK;
 }
 

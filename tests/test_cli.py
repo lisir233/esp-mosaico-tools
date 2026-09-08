@@ -600,7 +600,7 @@ class GatewayTests(unittest.TestCase):
         arguments = argparse.Namespace(gateway_profile=None, device_id="device-a")
         authorization = {
             "payload_base64": base64.b64encode(
-                b'{"code":"038271","expires_in_ms":60000,'
+                b'{"code":"038271","expires_in_ms":180000,'
                 b'"remaining_attempts":3}'
             ).decode("ascii")
         }
