@@ -87,6 +87,10 @@ from mosaico_cli.recovery import (
     _verification_path,
     load_bundle,
     provisioning_candidate,
+    read_rom_hardware_mac,
+    record_recovery_build_defaults,
+    recovery_build_defaults_are_current,
+    recovery_defaults_fingerprint,
     recovery_is_verified,
     recovery_verification_details,
 )
@@ -177,6 +181,13 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(value.source, "reviewed")
         self.assertEqual(value.timeout, 180)
         self.assertFalse(value.dry_run)
+
+    def test_recover_accepts_canonical_hardware_mac(self) -> None:
+        value = self.parse("recover", "--hardware-mac", "30-ED-A0-12-34-56")
+        self.assertEqual(value.hardware_mac, "30:ed:a0:12:34:56")
+
+        with self.assertRaises(SystemExit):
+            self.parse("recover", "--hardware-mac", "30:ed:a0")
 
     def test_enter_recovery_defaults(self) -> None:
         value = self.parse("enter-recovery", "--device-id", "device-a")
@@ -1785,6 +1796,37 @@ class ProjectTests(unittest.TestCase):
 
 
 class RecoveryBundleTests(unittest.TestCase):
+    def test_current_recovery_build_tracks_sdkconfig_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = root / "recovery"
+            build = project / "build"
+            project.mkdir()
+            build.mkdir()
+            (project / "sdkconfig.defaults").write_text(
+                "CONFIG_A=y\n", encoding="utf-8"
+            )
+            (project / "sdkconfig.recovery.defaults").write_text(
+                'CONFIG_APP_PROJECT_VER="1-recovery"\n', encoding="utf-8"
+            )
+            (build / "sdkconfig").write_text("CONFIG_A=y\n", encoding="utf-8")
+
+            fingerprint = recovery_defaults_fingerprint(project)
+            self.assertFalse(
+                recovery_build_defaults_are_current(build, fingerprint)
+            )
+            record_recovery_build_defaults(build, fingerprint)
+            self.assertTrue(recovery_build_defaults_are_current(build, fingerprint))
+
+            (project / "sdkconfig.recovery.defaults").write_text(
+                'CONFIG_APP_PROJECT_VER="2-recovery"\n', encoding="utf-8"
+            )
+            self.assertFalse(
+                recovery_build_defaults_are_current(
+                    build, recovery_defaults_fingerprint(project)
+                )
+            )
+
     def test_primary_verification_record_is_host_global(self) -> None:
         path = _verification_path("device")
         self.assertEqual(path, _host_verification_path("device"))
@@ -2291,6 +2333,69 @@ class RecoveryCommandTests(unittest.TestCase):
                 provisioning_candidate(context, select_model(WORKSPACE, None)), "/dev/rom"
             )
 
+    def test_multiple_rom_devices_can_be_selected_by_hardware_mac(self) -> None:
+        context = mock.Mock(workspace=WORKSPACE, repository=REPOSITORY)
+        context.run.return_value = SimpleNamespace(returncode=0, stdout='{"devices": []}')
+        macs = {
+            "/dev/rom-a": "30:ed:a0:00:00:01",
+            "/dev/rom-b": "30:ed:a0:00:00:02",
+            "/dev/rom-c": "30:ed:a0:00:00:03",
+        }
+        with ExitStack() as patches:
+            patches.enter_context(mock.patch(
+                "mosaico_cli.recovery.locate_iris_tools",
+                return_value=(Path("python"), Path("esp_iris.py")),
+            ))
+            patches.enter_context(mock.patch(
+                "mosaico_cli.recovery._registered_recovery_ports",
+                return_value=list(macs),
+            ))
+            patches.enter_context(mock.patch(
+                "mosaico_cli.recovery.read_rom_hardware_mac",
+                side_effect=lambda _context, _model, port, _idf: macs[port],
+            ))
+            selected = provisioning_candidate(
+                context,
+                select_model(WORKSPACE, None),
+                hardware_mac="30:ed:a0:00:00:02",
+                idf_path=Path("/idf"),
+            )
+        self.assertEqual(selected, "/dev/rom-b")
+
+    def test_rom_hardware_mac_uses_esptool_read_mac(self) -> None:
+        context = mock.Mock()
+        context.run.return_value = SimpleNamespace(
+            returncode=0, stdout="BASE MAC: 30:ED:A0:12:34:56\n"
+        )
+        prepared = SimpleNamespace(
+            python=Path("/idf-python"), values={"IDF_PATH": "/idf"}
+        )
+        with mock.patch(
+            "mosaico_cli.recovery.prepare_idf_environment", return_value=prepared
+        ):
+            result = read_rom_hardware_mac(
+                context,
+                select_model(WORKSPACE, None),
+                "/dev/cu.usbmodem101",
+                Path("/idf"),
+            )
+        self.assertEqual(result, "30:ed:a0:12:34:56")
+        argv = context.run.call_args.args[0]
+        self.assertEqual(argv[-1], "read-mac")
+        self.assertIn(
+            ["--port", "/dev/cu.usbmodem101"],
+            [argv[index:index + 2] for index in range(len(argv) - 1)],
+        )
+        self.assertIn(
+            ["--before", "no-reset"],
+            [argv[index:index + 2] for index in range(len(argv) - 1)],
+        )
+        self.assertIn(
+            ["--after", "no-reset"],
+            [argv[index:index + 2] for index in range(len(argv) - 1)],
+        )
+        self.assertIn("--no-stub", argv)
+
     def test_current_dry_run_does_not_build_or_flash(self) -> None:
         arguments = argparse.Namespace(
             model=None,
@@ -2320,6 +2425,12 @@ class RecoveryCommandTests(unittest.TestCase):
             _contexts.enter_context(
                 mock.patch(
                     "mosaico_cli.commands.resolve_idf_path", return_value=Path("/idf")
+                )
+            )
+            _contexts.enter_context(
+                mock.patch(
+                    "mosaico_cli.commands.read_rom_hardware_mac",
+                    return_value="30:ed:a0:12:34:56",
                 )
             )
             target = _contexts.enter_context(
@@ -2758,6 +2869,28 @@ class RecoveryCommandTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0)
             status.assert_called_once_with("child: streamed child output")
             self.assertIn("streamed child output", context.log_path.read_text())
+
+    def test_run_context_allocates_colliding_names_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = workspace_for(Path(temporary))
+            fixed_time = SimpleNamespace(
+                strftime=lambda _format: "20260909T060638Z"
+            )
+            with ExitStack() as contexts:
+                now = contexts.enter_context(
+                    mock.patch("mosaico_cli.runtime.datetime")
+                ).now
+                now.return_value = fixed_time
+                # Simulate a stale pre-check result.  Correct allocation must
+                # rely on atomic mkdir and retry the suffix after EEXIST.
+                contexts.enter_context(
+                    mock.patch.object(Path, "exists", return_value=False)
+                )
+                first = RunContext(workspace, "list")
+                second = RunContext(workspace, "list")
+            self.assertNotEqual(first.directory, second.directory)
+            self.assertEqual(first.directory.name, "20260909T060638Z-list")
+            self.assertEqual(second.directory.name, "20260909T060638Z-list-1")
 
     def test_run_context_hides_sensitive_command_and_output(self) -> None:
         with ExitStack() as _contexts:

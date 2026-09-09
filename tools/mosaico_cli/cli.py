@@ -61,6 +61,17 @@ def positive_timeout(value: str) -> float:
     return result
 
 
+def hardware_mac(value: str) -> str:
+    compact = value.replace(":", "").replace("-", "").lower()
+    if len(compact) != 12 or any(
+        character not in "0123456789abcdef" for character in compact
+    ):
+        raise argparse.ArgumentTypeError(
+            "hardware MAC must contain exactly 12 hexadecimal digits"
+        )
+    return ":".join(compact[index:index + 2] for index in range(0, 12, 2))
+
+
 def monitor_timeout(value: str) -> float:
     try:
         result = float(value)
@@ -202,8 +213,13 @@ def build_parser() -> argparse.ArgumentParser:
         default="reviewed",
         help="Reviewed base bundle or current-source candidate bundle",
     )
-    recover_parser.add_argument(
+    recover_identity = recover_parser.add_mutually_exclusive_group()
+    recover_identity.add_argument(
         "--device-id", help="Device ID used to correlate identity before and after recovery"
+    )
+    recover_identity.add_argument(
+        "--hardware-mac", type=hardware_mac,
+        help="Factory eFuse Base MAC used to select a managed or ROM-mode device",
     )
     recover_parser.add_argument(
         "--recovery-port", help="Explicit independent USB Serial/JTAG 303A:1001 port; requires a live managed device"
@@ -332,6 +348,7 @@ def _normalize_globals(argv: Sequence[str]) -> list[str]:
 def _print_device_table(result: dict[str, Any], details: bool) -> None:
     fields = [
         "device_id",
+        "hardware_mac",
         "online",
         "connection",
         "alias",

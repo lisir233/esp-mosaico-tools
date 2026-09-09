@@ -153,7 +153,7 @@ bootloader 暂存到 PSRAM，全部验证完成后统一提交。三种来源共
 `nvs` 和普通应用从 `0x200000` 之后开始。
 
 `sysmeta` 中的 `esp_iris`、`wifi`、`iris_ota_demo` 和 `update` namespace
-分别保存设备身份及 TCP pairing token、Factory Wi-Fi、Recovery OTA 状态和
+分别保存 TCP pairing token、Factory Wi-Fi、Recovery OTA 状态和
 最后一次系统更新结果。System Update v1 只要求 `otadata`、`phy_init`、
 `sysmeta`、`factory` 和 `coredump` 的名称、类型、子类型、offset、size 与 flags
 严格符合上表；`nvs`、`ota_0` 以及其他应用数据分区可由目标表调整。

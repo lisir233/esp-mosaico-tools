@@ -31,12 +31,19 @@ class RunContext:
     def __post_init__(self) -> None:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         base = self.workspace.run_dir
-        candidate = base / f"{stamp}-{self.action}"
-        suffix = 1
-        while candidate.exists():
-            candidate = base / f"{stamp}-{self.action}-{suffix}"
-            suffix += 1
-        candidate.mkdir(parents=True, exist_ok=False)
+        suffix = 0
+        while True:
+            name = f"{stamp}-{self.action}"
+            if suffix:
+                name += f"-{suffix}"
+            candidate = base / name
+            try:
+                # mkdir is the atomic allocation step.  An exists()/mkdir()
+                # pair races when two mosaico processes start in one second.
+                candidate.mkdir(parents=True, exist_ok=False)
+                break
+            except FileExistsError:
+                suffix += 1
         self.directory = candidate
         self.log_path = candidate / "raw.log"
         self.started_monotonic = time.monotonic()

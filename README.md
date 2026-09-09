@@ -33,6 +33,22 @@ consumers.
 The CLI searches the current directory and its parents for `.mosaico.json`.
 Use `--workspace PATH` to select another workspace explicitly.
 
+When multiple ESP32-S31 devices are already in ROM download mode, select the
+target by its factory eFuse Base MAC. The CLI reads every registered ROM
+endpoint without writing, repeats the MAC check immediately before flashing,
+and verifies the same MAC in Recovery after re-enumeration:
+
+```sh
+python mosaico.py recover --hardware-mac 30:ed:a0:12:34:56 --source current
+```
+
+After upgrading from an older ESP-Iris release, the live Device ID changes once
+from the NVS-stored random value to the deterministic hardware-derived value.
+The Gateway retains the old ID and its operations as offline history; refresh
+saved `--device-id` values with `python mosaico.py list`. Upgrade Recovery and
+normal firmware together, since mixed versions use different identity schemes.
+The pairing token and other retained NVS state are not erased.
+
 Run the self-contained tool tests with:
 
 ```sh
@@ -53,9 +69,9 @@ Omit `--source current` to use the reviewed bundle. `--dry-run` resolves the liv
 identity and port without building, leasing, resetting or writing. This option
 requires exactly one connected Espressif `303A:1001` interface, and the named
 port must identify it. Selecting it asserts that this independently connected
-interface belongs to the chosen board; USB serial numbers/MACs are not used to
-invent a mapping to the primary Device ID. With no live primary device, use the
-existing normal Recovery procedure instead.
+interface belongs to the chosen board. For a device already in ROM download
+mode, prefer `--hardware-mac`; its eFuse identity is read directly instead of
+inferring an association from USB topology.
 
 The command prepares the complete reviewed/current Recovery bundle before
 maintenance. It acquires the primary device lease (including crash evidence)

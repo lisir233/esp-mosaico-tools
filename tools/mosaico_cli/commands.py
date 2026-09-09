@@ -43,7 +43,11 @@ from .project import discover_artifacts, partition_table_flash_sha256, resolve_p
 from .recovery import (
     load_bundle,
     provisioning_candidate,
+    read_rom_hardware_mac,
     record_recovery_verification,
+    record_recovery_build_defaults,
+    recovery_build_defaults_are_current,
+    recovery_defaults_fingerprint,
     recovery_verification_details,
 )
 from .recovery_port import lease_port, same_port, serial_jtag_candidate
@@ -688,6 +692,8 @@ def recover(arguments: Any, context: RunContext) -> dict[str, Any]:
         f"recovery: model={model.id} target={model.target} source={arguments.source}"
     )
     recovery_project = workspace.recovery_project
+    idf_path = resolve_idf_path(workspace, recovery_project)
+    context.status(f"idf: environment ready at {idf_path}")
     bundle_dir = workspace.recovery_dir
     manifest: dict[str, Any] | None = None
     if arguments.source == "reviewed":
@@ -705,6 +711,7 @@ def recover(arguments: Any, context: RunContext) -> dict[str, Any]:
         context.status("bundle: current-source Recovery candidate selected")
 
     prior_device_id: str | None = arguments.device_id
+    selected_hardware_mac: str | None = getattr(arguments, "hardware_mac", None)
     prior_boot_id: str | None = None
     prior_session = None
     context.status("gateway: checking the currently connected device")
@@ -723,6 +730,17 @@ def recover(arguments: Any, context: RunContext) -> dict[str, Any]:
             prior_device = matches[0]
         else:
             context.note("warning: requested device was not reachable through Gateway")
+    elif selected_hardware_mac:
+        matches = [
+            item for item in devices
+            if str(item.get("hardware_mac") or "").lower() == selected_hardware_mac
+        ]
+        if len(matches) == 1:
+            prior_device = matches[0]
+        elif len(matches) > 1:
+            raise SelectionError(
+                f"Multiple managed devices reported hardware MAC {selected_hardware_mac}."
+            )
     elif len(devices) == 1:
         prior_device = devices[0]
     elif len(devices) > 1:
@@ -731,6 +749,9 @@ def recover(arguments: Any, context: RunContext) -> dict[str, Any]:
         )
     if prior_device is not None:
         prior_device_id = str(prior_device.get("device_id"))
+        selected_hardware_mac = str(
+            prior_device.get("hardware_mac") or selected_hardware_mac or ""
+        ) or None
         prior_boot_id = str(prior_device.get("boot_id") or "") or None
         context.status(
             f"device: {prior_device_id} mode="
@@ -756,12 +777,25 @@ def recover(arguments: Any, context: RunContext) -> dict[str, Any]:
 
     unowned_port: str | None = None
     if prior_device is None:
-        context.status("device: detecting a unique unowned ROM configuration interface")
-        unowned_port = provisioning_candidate(context, model)
-        context.status(f"device: recovery interface ready at {unowned_port}")
+        context.status("device: detecting an unowned ROM configuration interface")
+        unowned_port = provisioning_candidate(
+            context,
+            model,
+            hardware_mac=selected_hardware_mac,
+            idf_path=idf_path,
+        )
+        if selected_hardware_mac or arguments.source == "current":
+            rom_hardware_mac = read_rom_hardware_mac(
+                context, model, unowned_port, idf_path
+            )
+            if selected_hardware_mac and rom_hardware_mac != selected_hardware_mac:
+                raise DeviceError("Selected ROM endpoint hardware MAC changed during probing.")
+            selected_hardware_mac = rom_hardware_mac
+            context.status(
+                f"device: recovery interface ready at {unowned_port} "
+                f"hardware_mac={selected_hardware_mac}"
+            )
 
-    idf_path = resolve_idf_path(workspace, recovery_project)
-    context.status(f"idf: environment ready at {idf_path}")
     build_dir = recovery_project / "build-mosaico-recovery"
     plan = {
         "command": "recover",
@@ -769,6 +803,7 @@ def recover(arguments: Any, context: RunContext) -> dict[str, Any]:
         "model": model.id,
         "source": arguments.source,
         "device_id": prior_device_id,
+        "hardware_mac": selected_hardware_mac,
         "target": model.target,
         "recovery_version": manifest.get("version") if manifest else "current-source",
         "recovery_port": independent_identity,
@@ -807,6 +842,24 @@ def recover(arguments: Any, context: RunContext) -> dict[str, Any]:
             path.resolve().as_posix() for path in recovery_components
         ),
     }
+    defaults_fingerprint: str | None = None
+    if arguments.source == "current":
+        defaults_fingerprint = recovery_defaults_fingerprint(recovery_project)
+        if not recovery_build_defaults_are_current(
+            build_dir, defaults_fingerprint
+        ):
+            context.status(
+                "bundle: Recovery defaults changed; clearing the stale generated sdkconfig"
+            )
+            run_idf_target(
+                context,
+                idf_path=idf_path,
+                project=recovery_project,
+                build_dir=build_dir,
+                target="fullclean",
+                definitions=recovery_definitions,
+                timeout=arguments.timeout,
+            )
     run_idf_target(
         context,
         idf_path=idf_path,
@@ -816,6 +869,8 @@ def recover(arguments: Any, context: RunContext) -> dict[str, Any]:
         definitions=recovery_definitions,
         timeout=arguments.timeout,
     )
+    if defaults_fingerprint is not None:
+        record_recovery_build_defaults(build_dir, defaults_fingerprint)
     prepared_dir = build_dir / (
         "recovery" if arguments.source == "reviewed" else "recovery-current"
     )
@@ -874,6 +929,16 @@ def recover(arguments: Any, context: RunContext) -> dict[str, Any]:
             if active is not None:
                 renew_maintenance_lease(context, prior_session, active,
                                         ttl_seconds=arguments.timeout + 60)
+        if selected_hardware_mac and (
+            unowned_port is not None or independent_identity is not None
+        ):
+            current_hardware_mac = read_rom_hardware_mac(
+                context, model, port, idf_path
+            )
+            if current_hardware_mac != selected_hardware_mac:
+                raise DeviceError(
+                    "ROM endpoint hardware MAC changed before flashing; refusing to write."
+                )
         context.status(f"flash: writing the prepared complete Recovery bundle via {port}")
         run_idf_target(
             context, idf_path=idf_path, project=recovery_project,
@@ -887,6 +952,11 @@ def recover(arguments: Any, context: RunContext) -> dict[str, Any]:
         lease_finished = True
         evidence = completed.get("evidence", {})
         status = evidence.get("verification", {}) if isinstance(evidence, dict) else {}
+        if (selected_hardware_mac
+                and status.get("hardware_mac") != selected_hardware_mac):
+            raise OperationError(
+                "Recovery did not report the factory Base MAC selected in ROM mode."
+            )
         if independent_identity is not None:
             if (status.get("device_id") != prior_device_id
                     or not status.get("boot_id") or str(status["boot_id"]) == prior_boot_id
@@ -925,6 +995,7 @@ def recover(arguments: Any, context: RunContext) -> dict[str, Any]:
         **plan,
         "status": "succeeded",
         "device_id": verified_device_id,
+        "hardware_mac": status.get("hardware_mac") or selected_hardware_mac,
         "boot_id": status.get("boot_id"),
         "gateway_started": prior_session.started_local,
         "maintenance_lease_id": lease.get("lease_id") if lease else None,

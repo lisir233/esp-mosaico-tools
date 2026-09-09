@@ -6,21 +6,27 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import time
 from typing import Any
 
 from .errors import DeviceError, EnvironmentError, OperationError, SelectionError
 from .gateway import GatewaySession, connected_devices, gateway_json, locate_iris_tools
-from .host import state_root
+from .host import HostEnvironmentError, prepare_idf_environment, state_root
 from .registry import DeviceModel
 from .runtime import RunContext
 from .workspace import WorkspaceConfig
 
 
 REQUIRED_IMAGES = ("bootloader", "partition_table", "ota_data", "recovery")
+RECOVERY_DEFAULT_FILES = ("sdkconfig.defaults", "sdkconfig.recovery.defaults")
+RECOVERY_DEFAULTS_STAMP = ".mosaico-recovery-defaults.sha256"
 _VERIFICATION_READ_ATTEMPTS = 3
 _VERIFICATION_READ_RETRY_SECONDS = 0.05
+_ROM_MAC = re.compile(
+    r"(?:BASE )?MAC:\s*([0-9a-f]{2}(?::[0-9a-f]{2}){5})", re.IGNORECASE
+)
 
 
 def _verification_key(device_id: str) -> str:
@@ -199,6 +205,46 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def recovery_defaults_fingerprint(project: Path) -> str:
+    """Fingerprint the authoritative Recovery sdkconfig default inputs."""
+    digest = hashlib.sha256()
+    for name in RECOVERY_DEFAULT_FILES:
+        path = project / name
+        try:
+            content = path.read_bytes()
+        except OSError as error:
+            raise EnvironmentError(
+                f"Recovery configuration defaults are unavailable: {path}"
+            ) from error
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(content)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def recovery_build_defaults_are_current(build_dir: Path, fingerprint: str) -> bool:
+    """Return false when an existing generated sdkconfig predates the defaults."""
+    if not (build_dir / "sdkconfig").is_file():
+        return True
+    try:
+        recorded = (build_dir / RECOVERY_DEFAULTS_STAMP).read_text(
+            encoding="utf-8"
+        ).strip()
+    except OSError:
+        return False
+    return recorded == fingerprint
+
+
+def record_recovery_build_defaults(build_dir: Path, fingerprint: str) -> None:
+    """Record which defaults produced a successful current-source build."""
+    build_dir.mkdir(parents=True, exist_ok=True)
+    stamp = build_dir / RECOVERY_DEFAULTS_STAMP
+    temporary = stamp.with_suffix(".tmp")
+    temporary.write_text(f"{fingerprint}\n", encoding="utf-8")
+    temporary.replace(stamp)
+
+
 def load_bundle(directory: Path, expected_target: str) -> dict[str, Any]:
     manifest_path = directory / "manifest.json"
     try:
@@ -287,7 +333,57 @@ def _registered_recovery_ports(model: DeviceModel) -> list[str]:
     return sorted(set(matches))
 
 
-def provisioning_candidate(context: RunContext, model: DeviceModel) -> str:
+def read_rom_hardware_mac(
+    context: RunContext, model: DeviceModel, port: str, idf_path: Path
+) -> str:
+    """Read the immutable factory Base MAC from one ROM download endpoint."""
+    try:
+        prepared = prepare_idf_environment(idf_path)
+    except HostEnvironmentError as error:
+        raise EnvironmentError(
+            "The ESP-IDF environment could not be prepared for ROM identity probing."
+        ) from error
+    try:
+        result = context.run(
+            [
+                prepared.python,
+                "-m",
+                "esptool",
+                "--chip",
+                model.target,
+                "--port",
+                port,
+                # Identity probing must not consume the manually entered ROM
+                # state.  The default esptool reset policy boots the image in
+                # flash after read-mac, which makes a subsequent recover
+                # unable to find the selected endpoint.
+                "--before",
+                "no-reset",
+                "--after",
+                "no-reset",
+                "--no-stub",
+                "read-mac",
+            ],
+            timeout=30,
+            env=prepared.values,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise DeviceError(f"ROM identity probe timed out on {port}.") from error
+    match = _ROM_MAC.search(result.stdout or "")
+    if result.returncode or match is None:
+        raise DeviceError(
+            f"Could not read the factory Base MAC from ROM endpoint {port}."
+        )
+    return match.group(1).lower()
+
+
+def provisioning_candidate(
+    context: RunContext,
+    model: DeviceModel,
+    *,
+    hardware_mac: str | None = None,
+    idf_path: Path | None = None,
+) -> str:
     python, script = locate_iris_tools(context.workspace)
     try:
         result = context.run([python, script, "doctor", "--json"], timeout=15)
@@ -303,16 +399,53 @@ def provisioning_candidate(context: RunContext, model: DeviceModel) -> str:
         ) from error
 
     registered_ports = _registered_recovery_ports(model)
-    if len(registered_ports) == 1:
+    if len(registered_ports) == 1 and hardware_mac is None:
         # A board may expose a second, independently connected USB
         # Serial/JTAG interface for diagnostics. The model's registered ROM
         # VID/PID is the authoritative flash endpoint, so do not reject that
         # safe configuration as an ambiguous pair of low-level candidates.
         return registered_ports[0]
-    if len(registered_ports) > 1:
+    if registered_ports and hardware_mac is not None:
+        if idf_path is None:
+            raise EnvironmentError(
+                "ESP-IDF is required to select a ROM endpoint by hardware MAC."
+            )
+        discovered: dict[str, str] = {}
+        for port in registered_ports:
+            discovered[port] = read_rom_hardware_mac(
+                context, model, port, idf_path
+            )
+        matches = [port for port, value in discovered.items() if value == hardware_mac]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise SelectionError(
+                f"Hardware MAC {hardware_mac} was reported by multiple ROM endpoints."
+            )
+        available = ", ".join(
+            f"{value} at {port}" for port, value in sorted(discovered.items())
+        )
         raise SelectionError(
-            "Multiple registered recovery interfaces were detected; leave only "
-            "the target device connected."
+            f"No ROM endpoint reported hardware MAC {hardware_mac}. "
+            f"Detected: {available or 'none'}."
+        )
+    if len(registered_ports) > 1:
+        if idf_path is not None:
+            discovered = {
+                port: read_rom_hardware_mac(context, model, port, idf_path)
+                for port in registered_ports
+            }
+            available = ", ".join(
+                f"{value} at {port}"
+                for port, value in sorted(discovered.items())
+            )
+            raise SelectionError(
+                "Multiple registered recovery interfaces were detected; "
+                f"select one with --hardware-mac. Detected: {available}."
+            )
+        raise SelectionError(
+            "Multiple registered recovery interfaces were detected; specify "
+            "the target with --hardware-mac."
         )
 
     candidates = [
@@ -328,9 +461,22 @@ def provisioning_candidate(context: RunContext, model: DeviceModel) -> str:
             "power it on, release Boot after it enters recovery mode, and try again."
         )
     if len(candidates) != 1:
+        if hardware_mac and idf_path is not None:
+            discovered = {
+                str(item["path"]): read_rom_hardware_mac(
+                    context, model, str(item["path"]), idf_path
+                )
+                for item in candidates
+            }
+            matches = [
+                port for port, value in discovered.items()
+                if value == hardware_mac
+            ]
+            if len(matches) == 1:
+                return matches[0]
         raise SelectionError(
-            "Multiple low-level device candidates were detected; leave only the target "
-            "device connected."
+            "Multiple low-level device candidates were detected; select the target "
+            "with --hardware-mac."
         )
     return str(candidates[0]["path"])
 
