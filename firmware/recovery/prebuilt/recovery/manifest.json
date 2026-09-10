@@ -4,8 +4,8 @@
     "bootloader": {
       "file": "bootloader.bin",
       "offset": "0x2000",
-      "sha256": "f8eb577c11066d5655bb66b1c62c1bbd027642891f24ec29d74e1113f0eb035f",
-      "size": 22736
+      "sha256": "caeca58b7866424e480291d0727101b4dbf1f13606bbeff0fb7b3815bab6c658",
+      "size": 21872
     },
     "ota_data": {
       "file": "ota_data_initial.bin",
@@ -22,7 +22,7 @@
     "recovery": {
       "file": "factory.bin",
       "offset": "0x20000",
-      "sha256": "7fbe542f5ca66187585f2d344ae98254fc4756b2b119518409d22cbc9a409360",
+      "sha256": "102273aeb86e3087f0aa095a59a740dcd1052f4c1409b0cc386b22667e485ac5",
       "size": 1697392
     }
   },
@@ -50,9 +50,9 @@
     "secure_boot": false
   },
   "source": {
-    "commit": "549803de08ccfe801a64d259bef6f984c6ddaede",
+    "commit": "1e12ea32af55530c87a91da349d7ae28791238d6",
     "dirty": false
   },
   "target": "esp32s31",
-  "version": "2.8.3-recovery"
+  "version": "2.8.4-recovery"
 }
